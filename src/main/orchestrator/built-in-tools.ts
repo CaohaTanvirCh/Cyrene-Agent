@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import { toolRegistry } from "./tool-registry";
 import { addMcpServer } from "./mcp-manager";
 import { sendToLive2DWindow } from "../index";
+import { getWorkspace, resolveWorkspacePath } from "../workspace";
 import { createPlayLive2DActionTool } from "./tools/play-live2d-action";
 
 const LOG_PREFIX = "[BuiltinTools]";
@@ -225,7 +226,15 @@ async function executeRunShell(args: Record<string, unknown>): Promise<string> {
   const cmd = String(args.command || "").trim();
   // 容错：模型常把 args 当字符串传（如 "--version"），normalizeArgs 会自动拆成 argv 数组
   const cmdArgs = normalizeArgs(args.args);
-  const cwd = args.cwd ? String(args.cwd) : undefined;
+  // 旧逻辑：cwd 仅取模型显式传入
+  // const cwd = args.cwd ? String(args.cwd) : undefined;
+  // 新逻辑：模型显式传 cwd 优先（相对路径按工作目录解析）；否则默认用工作目录（空则 undefined=进程 cwd）。
+  let cwd: string | undefined;
+  if (args.cwd) {
+    cwd = resolveWorkspacePath(String(args.cwd)) ?? String(args.cwd);
+  } else {
+    cwd = getWorkspace() || undefined;
+  }
   if (!cmd) return "[错误] command 不能为空";
 
   console.log(LOG_PREFIX, "run_shell:", cmd, JSON.stringify(cmdArgs), cwd ? "cwd=" + cwd : "");

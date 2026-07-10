@@ -102,6 +102,12 @@ export const IPC = {
   MODEL_CONFIG_GET: "model-config:get",
   MODEL_CONFIG_CHANGED: "model-config:changed",
 
+  // 工作目录（workspace）—— agent 的当前基准目录（可选，空=纯聊天模式）
+  WORKSPACE_GET: "workspace:get",
+  WORKSPACE_SET: "workspace:set",       // renderer → main：设置目录（传空串清除）
+  WORKSPACE_PICK: "workspace:pick",     // renderer → main：弹目录选择框并设置
+  WORKSPACE_CHANGED: "workspace:changed", // main → 所有窗口：工作目录变更广播
+
   // runtime state updates (status / feeling / expression)
   RUNTIME_STATE_GET: "runtime-state:get",
   RUNTIME_STATE_CHANGED: "runtime-state:changed",

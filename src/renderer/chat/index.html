@@ -52,6 +52,11 @@
             </span>
           </div>
           <div class="chat__titlebar-actions">
+            <button type="button" class="chat__workspace-btn" id="workspace-btn" title="选择工作目录（agent 基准目录）">
+              <span class="chat__workspace-icon" aria-hidden="true">📁</span>
+              <span class="chat__workspace-label" id="workspace-label">选择目录</span>
+              <span class="chat__workspace-clear" id="workspace-clear" title="清除工作目录（回到纯聊天）" hidden>✕</span>
+            </button>
             <div class="dropdown-trigger" data-dropdown="mode-dropdown">
               <span class="dt-label">模式</span>
               <span class="dt-value" id="mode-val">协作</span>

@@ -177,6 +177,9 @@ const chatRail = document.getElementById("chat-rail") as HTMLElement | null;
 const chatRailNew = document.getElementById("chat-rail-new") as HTMLButtonElement | null;
 const chatRailList = document.getElementById("chat-rail-list") as HTMLElement | null;
 const chatRailEmpty = document.getElementById("chat-rail-empty") as HTMLElement | null;
+const workspaceBtn = document.getElementById("workspace-btn") as HTMLButtonElement | null;
+const workspaceLabel = document.getElementById("workspace-label") as HTMLElement | null;
+const workspaceClear = document.getElementById("workspace-clear") as HTMLElement | null;
 
 // 旧版 localStorage key——首次启动时检测到老数据会迁移到主进程 chats 存储再清掉。
 const LEGACY_STORAGE_KEY = "cyrene.chat.history.v1";
@@ -309,6 +312,58 @@ async function initModelConfig(): Promise<void> {
   window.modelConfig?.onChanged((config) => applyModelConfig(config));
 }
 
+// ── 工作目录（workspace）UI ──────────────────────────────────
+// 顶部按钮显示当前 agent 基准目录；点击选目录，✕ 清除回到纯聊天。
+// 只取目录名做短标签，完整路径放 title 悬浮提示。
+function applyWorkspace(dir: string): void {
+  if (!workspaceBtn || !workspaceLabel || !workspaceClear) return;
+  if (dir) {
+    const name = dir.split(/[\\/]/).filter(Boolean).pop() || dir;
+    workspaceLabel.textContent = name;
+    workspaceBtn.title = "工作目录：" + dir + "（点击切换）";
+    workspaceBtn.classList.add("is-active");
+    workspaceClear.hidden = false;
+  } else {
+    workspaceLabel.textContent = "选择目录";
+    workspaceBtn.title = "选择工作目录（agent 基准目录）";
+    workspaceBtn.classList.remove("is-active");
+    workspaceClear.hidden = true;
+  }
+}
+
+async function initWorkspace(): Promise<void> {
+  if (!workspaceBtn) return;
+  try {
+    const cur = await window.workspace?.get();
+    applyWorkspace(cur?.dir ?? "");
+  } catch { applyWorkspace(""); }
+
+  workspaceBtn.addEventListener("click", async (e) => {
+    // 点 ✕ 走清除分支，不触发选目录
+    if ((e.target as HTMLElement)?.id === "workspace-clear") return;
+    try {
+      const res = await window.workspace?.pick();
+      if (res?.ok && res.dir !== undefined) applyWorkspace(res.dir);
+      else if (res && !res.ok && !res.canceled && res.error) console.warn("[Cyrene Chat] 选择工作目录失败:", res.error);
+    } catch (err) {
+      console.warn("[Cyrene Chat] 选择工作目录异常:", err);
+    }
+  });
+
+  workspaceClear?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try {
+      const res = await window.workspace?.set("");
+      if (res?.ok) applyWorkspace("");
+    } catch (err) {
+      console.warn("[Cyrene Chat] 清除工作目录异常:", err);
+    }
+  });
+
+  // 其他窗口改了工作目录时同步 UI
+  window.workspace?.onChanged((dir) => applyWorkspace(dir));
+}
+
 // ── 多会话存储桥接 ───────────────────────────────────────────
 // 旧版聊天记录从 localStorage 一次性迁移到主进程 chats 存储，之后整窗口
 // 所有读写都走 IPC（window.chatStore）。所有 saveHistory 调用点改成
@@ -353,7 +408,16 @@ interface ChatStoreApi {
 declare global {
   interface Window {
     chatStore?: ChatStoreApi;
+    workspace?: WorkspaceApi;
   }
+}
+
+// 工作目录（workspace）：agent 的当前基准目录（可选，空=纯聊天模式）
+interface WorkspaceApi {
+  get: () => Promise<{ dir: string }>;
+  set: (dir: string | null) => Promise<{ ok: boolean; dir?: string; error?: string }>;
+  pick: () => Promise<{ ok: boolean; dir?: string; error?: string; canceled?: boolean }>;
+  onChanged: (callback: (dir: string) => void) => () => void;
 }
 
 // 把渲染端 Message 数组归一化为后端能持久化的形态：
@@ -2954,6 +3018,7 @@ void (async () => {
   buildQuickPresets();
   installSchedulerEventListener();
   void initModelConfig();
+  void initWorkspace();
 })();
 
 // main → renderer：权限审批请求（per-action 档位下工具调用前）

@@ -1052,6 +1052,53 @@ body {
   transform: rotate(180deg);
 }
 
+/* ===== 工作目录按钮（agent 基准目录） ===== */
+.chat__workspace-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--rb-border-faint);
+  color: var(--rb-text-default);
+  cursor: pointer;
+  user-select: none;
+  -webkit-app-region: no-drag;
+  transition: background 0.12s, border-color 0.12s;
+}
+.chat__workspace-btn:hover {
+  background: var(--rb-border-faint);
+  border-color: var(--rb-border-soft);
+}
+.chat__workspace-btn.is-active {
+  border-color: rgba(236, 72, 153, 0.45);
+  background: rgba(236, 72, 153, 0.10);
+}
+.chat__workspace-icon { font-size: 12px; line-height: 1; }
+.chat__workspace-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--rb-pink-100);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;      /* 路径过长时保留尾部（目录名）可见 */
+  text-align: left;
+}
+.chat__workspace-clear {
+  font-size: 10px;
+  color: var(--rb-text-faint);
+  padding: 0 2px;
+  border-radius: 4px;
+}
+.chat__workspace-clear:hover {
+  color: var(--rb-pink-200);
+  background: rgba(255, 255, 255, 0.10);
+}
+
 /* ===== Dropdown menus (at body level) ===== */
 .dropdown-menu {
   position: fixed;

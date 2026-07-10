@@ -5,6 +5,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { toolRegistry } from "./tool-registry";
 import { captionImage } from "./vision-captioner";
+import { resolveWorkspacePath } from "../workspace";
 import type { ToolContext } from "./tool-context";
 
 const LOG_PREFIX = "[FsTools]";
@@ -16,8 +17,19 @@ const IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 图片最多 5MB
 // 图片扩展名集合，用于 list_dir 标注 [图片] 和汇总计数
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"]);
 
+// 旧逻辑：只接受绝对路径，相对路径一律拒绝。
+// function ensureAbsolute(p: string): string | null {
+//   if (!p) return null;
+//   if (!path.isAbsolute(p)) return null;
+//   return path.normalize(p);
+// }
+// 新逻辑：软约束工作目录。绝对路径原样用；相对路径在有工作区时相对工作区解析，
+// 无工作区时回退到"必须绝对路径"的原行为（返回 null）。
 function ensureAbsolute(p: string): string | null {
   if (!p) return null;
+  const resolved = resolveWorkspacePath(p);
+  if (resolved) return resolved;
+  // 无工作区且是相对路径 → 沿用原行为拒绝
   if (!path.isAbsolute(p)) return null;
   return path.normalize(p);
 }
@@ -38,7 +50,7 @@ function humanBytes(n: number): string {
 async function executeReadFile(args: Record<string, unknown>): Promise<string> {
   const raw = String(args.path || "").trim();
   const filePath = ensureAbsolute(raw);
-  if (!filePath) return "[错误] path 必须是绝对路径";
+  if (!filePath) return "[错误] path 无效：未设置工作目录时必须给绝对路径；已设置工作目录时可给相对路径";
 
   const stat = safeStat(filePath);
   if (!stat) return "[错误] 文件不存在或无法访问: " + filePath;
@@ -121,7 +133,7 @@ toolRegistry.register({
 async function executeListDir(args: Record<string, unknown>): Promise<string> {
   const raw = String(args.path || "").trim();
   const dirPath = ensureAbsolute(raw);
-  if (!dirPath) return "[错误] path 必须是绝对路径";
+  if (!dirPath) return "[错误] path 无效：未设置工作目录时必须给绝对路径；已设置工作目录时可给相对路径";
 
   const stat = safeStat(dirPath);
   if (!stat) return "[错误] 目录不存在或无法访问: " + dirPath;
@@ -218,7 +230,7 @@ toolRegistry.register({
 async function executeWriteFile(args: Record<string, unknown>): Promise<string> {
   const raw = String(args.path || "").trim();
   const filePath = ensureAbsolute(raw);
-  if (!filePath) return "[错误] path 必须是绝对路径";
+  if (!filePath) return "[错误] path 无效：未设置工作目录时必须给绝对路径；已设置工作目录时可给相对路径";
 
   const content = typeof args.content === "string" ? args.content : "";
   const append = args.append === true;
@@ -297,7 +309,7 @@ async function executeReadImage(
 ): Promise<string> {
   const raw = String(args.path || "").trim();
   const filePath = ensureAbsolute(raw);
-  if (!filePath) return "[错误] path 必须是绝对路径";
+  if (!filePath) return "[错误] path 无效：未设置工作目录时必须给绝对路径；已设置工作目录时可给相对路径";
 
   const stat = safeStat(filePath);
   if (!stat) return "[错误] 文件不存在或无法访问: " + filePath;

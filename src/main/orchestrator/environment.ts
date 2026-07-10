@@ -14,6 +14,7 @@ import { toolRegistry } from "./tool-registry";
 import { listMcpServers } from "./mcp-manager";
 import { ACCESS_LEVEL_LABEL, getCurrentLevel, policyFor } from "../permission";
 import type { ToolRiskLevel } from "../permission";
+import { getWorkspace } from "../workspace";
 import { getCapability } from "./vendors/capabilities";
 
 const LOG_PREFIX = "[Env]";
@@ -116,6 +117,16 @@ export function buildEnvironmentContext(modelInfo?: ModelInfo, userInfo?: UserIn
   if (downloads) lines.push(`- 下载路径：${downloads}`);
   lines.push("");
   lines.push(`- 文件权限档位：${levelLabel}（${level}）`);
+  // 工作目录（workspace）：agent 的当前基准目录。空 = 纯聊天模式（无工作区）。
+  const workspace = getWorkspace();
+  if (workspace) {
+    lines.push(`- 当前工作目录：${workspace}`);
+    lines.push("  · 用户给相对路径（如 src/index.ts、./notes.txt）时，以这个工作目录为基准解析。");
+    lines.push("  · run_shell / 生成文档等未指定目录时，默认在这个工作目录下操作。");
+    lines.push("  · 仍可用绝对路径访问工作目录以外的位置（受权限档位约束）。");
+  } else {
+    lines.push("- 当前工作目录：未设置（纯聊天模式）。文件类工具需要完整绝对路径；可提示用户在聊天窗顶部选择工作目录以启用相对路径。");
+  }
   lines.push(`- 当前档位下可直接调用的工具：${allowedTools.length > 0 ? allowedTools.join(", ") : "（无）"}`);
   if (askTools.length > 0) {
     lines.push(`- 当前档位需先弹审批的工具：${askTools.join(", ")}`);

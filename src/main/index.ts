@@ -28,6 +28,7 @@ import { initMcpManager, addMcpServer, removeMcpServer, listMcpServers, pruneMcp
 import { syncPlaywrightMcp, PLAYWRIGHT_MCP_ID, REMOVED_BUILTIN_MCP_IDS } from "./sync-mcp-builtin";
 import { buildEnvironmentContext } from "./orchestrator/environment";
 import { initPermissionFromDisk, registerPermissionIpc, getCurrentLevel } from "./permission";
+import { initWorkspaceFromDisk, getWorkspace, setWorkspace } from "./workspace";
 import { registerChoiceIpc, setChoiceCardSender } from "./user-choice";
 import { enqueueLLMTask } from "./llm-queue";
 import { getEmbeddingStatus, downloadEmbeddingModel, deleteEmbeddingModel } from "./embedding-manager";
@@ -2759,6 +2760,34 @@ ipcMain.handle(IPC.RUNTIME_STATE_GET, () => {
   return runtimeState;
 });
 
+// ── 工作目录（workspace）IPC ──────────────────────────────
+function broadcastWorkspaceChanged(): void {
+  broadcastToAuxWindows(IPC.WORKSPACE_CHANGED, { dir: getWorkspace() });
+}
+
+ipcMain.handle(IPC.WORKSPACE_GET, () => {
+  return { dir: getWorkspace() };
+});
+
+ipcMain.handle(IPC.WORKSPACE_SET, (_event, dir: string | null) => {
+  const result = setWorkspace(dir);
+  if (result.ok) broadcastWorkspaceChanged();
+  return result;
+});
+
+ipcMain.handle(IPC.WORKSPACE_PICK, async () => {
+  const result = await dialog.showOpenDialog({
+    title: "选择工作目录",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (result.canceled || result.filePaths.length === 0) {
+    return { ok: false, canceled: true };
+  }
+  const set = setWorkspace(result.filePaths[0]);
+  if (set.ok) broadcastWorkspaceChanged();
+  return set;
+});
+
 ipcMain.handle(IPC.SETTINGS_SAVE_CONFIG, (_event, settings: Partial<ModelSettings>) => {
   const saved = saveModelSettings(settings);
   broadcastModelConfigChanged(saved);
@@ -3943,6 +3972,9 @@ app.whenReady().then(async () => {
   // 权限模块初始化：必须在 createWindow 之后但任意工具调用之前
   initPermissionFromDisk();
   registerPermissionIpc();
+  // 工作目录初始化：从磁盘恢复上次选择的目录（空=纯聊天模式）
+  initWorkspaceFromDisk();
+  console.log("[Cyrene] 当前工作目录:", getWorkspace() || "(未设置·纯聊天模式)");
   registerChoiceIpc();
   registerCallIpc();
   console.log("[Cyrene] 当前 agent 权限档位:", getCurrentLevel());

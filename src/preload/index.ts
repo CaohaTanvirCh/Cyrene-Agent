@@ -299,8 +299,21 @@ const modelConfigApi = {
     return () => ipcRenderer.removeListener(IPC.MODEL_CONFIG_CHANGED, listener);
   },
 };
-
 contextBridge.exposeInMainWorld("modelConfig", modelConfigApi);
+
+// 工作目录（workspace）：agent 的当前基准目录（可选，空=纯聊天模式）
+const workspaceApi = {
+  get: () => ipcRenderer.invoke(IPC.WORKSPACE_GET) as Promise<{ dir: string }>,
+  set: (dir: string | null) => ipcRenderer.invoke(IPC.WORKSPACE_SET, dir) as Promise<{ ok: boolean; dir?: string; error?: string }>,
+  pick: () => ipcRenderer.invoke(IPC.WORKSPACE_PICK) as Promise<{ ok: boolean; dir?: string; error?: string; canceled?: boolean }>,
+  onChanged: (callback: (dir: string) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, payload: { dir: string }) => callback(payload?.dir ?? "");
+    ipcRenderer.on(IPC.WORKSPACE_CHANGED, listener);
+    return () => ipcRenderer.removeListener(IPC.WORKSPACE_CHANGED, listener);
+  },
+};
+contextBridge.exposeInMainWorld("workspace", workspaceApi);
+
 const runtimeStateApi = {
   get: () => ipcRenderer.invoke(IPC.RUNTIME_STATE_GET),
   onChanged: (callback: (state: unknown) => void) => {
