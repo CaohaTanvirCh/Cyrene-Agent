@@ -104,13 +104,20 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
     const jsonStr = event.data.trim();
     if (!jsonStr) return null;
     if (jsonStr === "[DONE]") return { done: true };
-    let parsed: { choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown; tool_calls?: unknown } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+    let parsed: {
+      choices?: Array<{
+        delta?: { content?: unknown; reasoning_content?: unknown; tool_calls?: unknown };
+        finish_reason?: string | null;
+      }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
     try {
       parsed = JSON.parse(jsonStr);
     } catch {
       return null;
     }
-    const delta = parsed?.choices?.[0]?.delta;
+    const choice = parsed?.choices?.[0];
+    const delta = choice?.delta;
     if (!delta) {
       // 流末尾的 usage 块（choices 为空但带 usage）
       if (parsed?.usage) {
@@ -121,15 +128,33 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
           },
         };
       }
+      // 仅带 finish_reason 的收尾块
+      if (choice && choice.finish_reason) {
+        return { finishReason: choice.finish_reason };
+      }
       return null;
     }
     const chunk: StreamChunk = {};
     if (typeof delta.content === "string") chunk.deltaText = delta.content;
     if (typeof delta.reasoning_content === "string") chunk.deltaThinking = delta.reasoning_content;
-    // 暂不实现：if (Array.isArray(delta.tool_calls)) chunk.deltaToolCalls = ...
-    // 当前三个调用点（MemoryJudge / memory-compressor / 心情观察器）都不带 tools，
-    // 未来若需要流式 tool_call 增量，单独实现 + 加测试即可。
-    return chunk;
+    // 流式 tool_calls 增量：delta.tool_calls[] 每片带 index，跨 chunk 用 index 拼接
+    if (Array.isArray(delta.tool_calls)) {
+      const deltas: import("./types").ToolCallDelta[] = [];
+      for (const raw of delta.tool_calls as Array<{
+        index?: number; id?: string; function?: { name?: string; arguments?: string };
+      }>) {
+        deltas.push({
+          index: typeof raw.index === "number" ? raw.index : 0,
+          id: raw.id,
+          name: raw.function?.name,
+          argumentsDelta: raw.function?.arguments,
+        });
+      }
+      if (deltas.length > 0) chunk.toolCallDeltas = deltas;
+    }
+    // finish_reason 与 delta 同块到达时也带上（部分厂商会一起发）
+    if (choice?.finish_reason) chunk.finishReason = choice.finish_reason;
+    return Object.keys(chunk).length > 0 ? chunk : null;
   }
 
   parseResponse(raw: unknown): ChatResponse {

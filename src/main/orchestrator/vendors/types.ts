@@ -94,8 +94,20 @@ export interface StreamChunk {
   deltaText?: string;
   deltaThinking?: string;
   deltaToolCalls?: ToolCall[];
+  /** 流式 tool_call 增量（OpenAI: delta.tool_calls[]，按 index 跨 chunk 拼接）。 */
+  toolCallDeltas?: ToolCallDelta[];
+  /** 本 choice 的 finish_reason（如 "stop"/"tool_calls"/"length"），到达时携带。 */
+  finishReason?: string;
   done?: boolean;
   usage?: { input: number; output: number };
+}
+
+/** 流式工具调用增量片段。index 用于把跨多个 chunk 的同一个 tool_call 拼起来。 */
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  name?: string;
+  argumentsDelta?: string;
 }
 
 /** 适配器解析后的统一响应，调度层只看这个。 */

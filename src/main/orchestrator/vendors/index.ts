@@ -6,13 +6,13 @@ import { getCapability, getCapabilityOrOpenAI, PROVIDER_CAPABILITIES } from "./c
 import { resolveTransport } from "./transport-detector";
 import type {
   ChatMessage, ChatRequest, ChatResponse, ChatVendorAdapter, HttpRequest,
-  ProviderCapability, StreamChunk, StreamEvent, TestConnectionResult, ToolCall, ToolExecutionResult,
+  ProviderCapability, StreamChunk, StreamEvent, TestConnectionResult, ToolCall, ToolCallDelta, ToolExecutionResult,
   ToolSpec, Transport, VendorConfig,
 } from "./types";
 
 export type {
   ChatMessage, ChatRequest, ChatResponse, ChatVendorAdapter, HttpRequest,
-  ProviderCapability, StreamChunk, StreamEvent, TestConnectionResult, ToolCall, ToolExecutionResult,
+  ProviderCapability, StreamChunk, StreamEvent, TestConnectionResult, ToolCall, ToolCallDelta, ToolExecutionResult,
   ToolSpec, Transport, VendorConfig,
 };
 export { getCapability, getCapabilityOrOpenAI, PROVIDER_CAPABILITIES };

@@ -19,8 +19,11 @@ import { type ToolCallResult } from "./types";
 import { checkPermission, type ToolRiskLevel } from "../permission";
 import {
   getAdapter,
+  createSseReader,
   type ChatMessage,
   type ChatRequest,
+  type ChatResponse,
+  type ToolCall,
   type ToolExecutionResult,
   type ToolSpec,
 } from "./vendors";
@@ -53,6 +56,8 @@ export interface CyreneRunOptions {
   timeoutMs: number;
   /** 可选：本次 run 的工具集合。未传时使用当前所有已启用工具。 */
   tools?: ToolDefinition[];
+  /** 是否启用真流式输出（思考+答案实时）。仅 OpenAI transport 生效；默认关（由调用方按设置传入）。 */
+  streamingOutput?: boolean;
 }
 
 /** FC 循环最终结果（供桥层做副作用用）。 */
@@ -103,6 +108,146 @@ function emitTextMessage(
   observer.next({ type: EventType.TEXT_MESSAGE_END, messageId });
 }
 
+/** 流式一轮的结果，形态与 adapter.parseResponse 的 ChatResponse 对齐（供 FC 循环共用后续逻辑）。 */
+interface StreamRoundResult {
+  text: string;
+  thinking?: string;
+  toolCalls: ToolCall[];
+  finishReason: string;
+  usage?: { input: number; output: number };
+  assistantMessage: ChatMessage;
+  /** 是否已经通过 TEXT_MESSAGE 流把正文发给前端（无工具调用的纯文本轮）。 */
+  textAlreadyStreamed: boolean;
+  /** 本轮用于前端流式展示的 messageId（textAlreadyStreamed 时有效）。 */
+  streamedMessageId?: string;
+}
+
+/**
+ * 真流式跑一轮（仅 OpenAI transport 用）。
+ * - thinking 增量：实时发 CUSTOM cyrene.thinking（append 语义），前端边想边显示。
+ * - text 增量：实时发 TEXT_MESSAGE_START/CONTENT（不预先切片，直接透传厂商 delta）。
+ *   注意：若本轮最终是工具调用（无正文或正文只是过程），仍会把已发的 text 作为 assistant content 记录。
+ * - tool_calls 增量：按 index 跨 chunk 拼接 id/name/arguments。
+ *
+ * 抛 AbortError 交由上层按超时逻辑处理，与非流式路径一致。
+ */
+async function streamOneRound(
+  adapter: ReturnType<typeof getAdapter>,
+  req: ChatRequest,
+  settings: AgentLoopSettings,
+  observer: { next: (e: BaseEvent) => void },
+  perRoundTimeoutMs: number,
+  round: number,
+): Promise<StreamRoundResult> {
+  const http = adapter.buildStreamRequest({ ...req, stream: true }, settings);
+  console.log(LOG_PREFIX, "流式请求:", http.url);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), perRoundTimeoutMs);
+
+  // 流式增量累积
+  let text = "";
+  let thinking = "";
+  let finishReason = "stop";
+  let usage: { input: number; output: number } | undefined;
+  // 工具调用按 index 拼接
+  const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+
+  // 正文流式展示：首个 text delta 到达时才发 TEXT_MESSAGE_START
+  let textStarted = false;
+  const streamedMessageId = `msg-${Date.now()}-${round}`;
+  // 思考流式展示：CUSTOM cyrene.thinking 用 append 语义，前端累积
+  let thinkingStarted = false;
+
+  try {
+    const response = await fetch(http.url, {
+      method: "POST",
+      signal: controller.signal,
+      headers: http.headers,
+      body: http.body,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error("模型请求失败：HTTP " + response.status + (errorText ? " — " + errorText.slice(0, 200) : ""));
+    }
+    if (!response.body) throw new Error("响应体为空，不支持流式读取");
+
+    for await (const event of createSseReader(adapter, response.body)) {
+      const chunk = adapter.parseStreamEvent(event);
+      if (!chunk) continue;
+
+      if (chunk.deltaThinking) {
+        thinking += chunk.deltaThinking;
+        observer.next({
+          type: EventType.CUSTOM,
+          name: "cyrene.thinking",
+          value: { round: round + 1, delta: chunk.deltaThinking, append: true, start: !thinkingStarted },
+        } as BaseEvent);
+        thinkingStarted = true;
+      }
+
+      if (chunk.deltaText) {
+        if (!textStarted) {
+          observer.next({ type: EventType.TEXT_MESSAGE_START, messageId: streamedMessageId, role: "assistant" } as BaseEvent);
+          textStarted = true;
+        }
+        text += chunk.deltaText;
+        observer.next({ type: EventType.TEXT_MESSAGE_CONTENT, messageId: streamedMessageId, delta: chunk.deltaText } as BaseEvent);
+      }
+
+      if (chunk.toolCallDeltas) {
+        for (const d of chunk.toolCallDeltas) {
+          const cur = toolAcc.get(d.index) ?? { id: "", name: "", args: "" };
+          if (d.id) cur.id = d.id;
+          if (d.name) cur.name = d.name;
+          if (d.argumentsDelta) cur.args += d.argumentsDelta;
+          toolAcc.set(d.index, cur);
+        }
+      }
+
+      if (chunk.finishReason) finishReason = chunk.finishReason;
+      if (chunk.usage) usage = chunk.usage;
+      if (chunk.done) break;
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // 组装 toolCalls（按 index 排序）
+  const toolCalls: ToolCall[] = [...toolAcc.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, v]) => ({ id: v.id || `call_${Math.random().toString(36).slice(2, 10)}`, name: v.name, arguments: v.args }));
+
+  // 有工具调用时，finishReason 归一到 tool_calls（部分厂商流式最后才给，或不给）
+  if (toolCalls.length > 0 && finishReason !== "tool_calls") finishReason = "tool_calls";
+
+  // 正文已流式发完的纯文本轮：补一个 TEXT_MESSAGE_END
+  const textAlreadyStreamed = textStarted && toolCalls.length === 0;
+  if (textAlreadyStreamed) {
+    observer.next({ type: EventType.TEXT_MESSAGE_END, messageId: streamedMessageId } as BaseEvent);
+  }
+
+  const assistantMessage: ChatMessage = {
+    role: "assistant",
+    ...(text ? { content: text } : {}),
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    ...(thinking ? { thinking } : {}),
+  };
+
+  return {
+    text,
+    thinking: thinking || undefined,
+    toolCalls,
+    finishReason,
+    usage,
+    assistantMessage,
+    textAlreadyStreamed,
+    streamedMessageId: textAlreadyStreamed ? streamedMessageId : undefined,
+  };
+}
+
+
 /**
  * 强制总结也失败时的降级文案。用已收集的工具结果拼一个"任务中断"回复，
  * 避免整个 run 抛 subscriber.error 让用户彻底看不到任何回复。
@@ -149,6 +294,11 @@ async function runFcLoopWithEvents(
   console.log(LOG_PREFIX, "可用工具:", tools.map(t => t.name).join(", ") || "(无)");
   console.log(LOG_PREFIX, "消息数:", messages.length, "最后一角色:", messages[messages.length - 1]?.role);
 
+  // 流式开关：仅 OpenAI transport 且调用方开启时走真流式（思考+答案实时）。
+  // Anthropic（MiniMax）多轮 rawAssistant 回传更微妙，即使开关开着也走原非流式路径。
+  const useStreaming = options.streamingOutput === true && adapter.transport === "openai";
+  console.log(LOG_PREFIX, "流式输出:", useStreaming ? "开启" : "关闭（非流式）");
+
   let conversation: ChatMessage[] = messages.map(m => ({ ...m }));
 
   // 清空本轮 skill reference 已读记录，防止跨对话污染
@@ -173,47 +323,88 @@ async function runFcLoopWithEvents(
     };
     if (adapter.applyCacheHints) req = adapter.applyCacheHints(req, settings);
 
-    const http = adapter.buildRequest(req, settings);
-    console.log(LOG_PREFIX, "请求:", http.url);
+    // ── 分支：流式 vs 非流式 ──────────────────────────────
+    // 统一产出 chat（含 text/thinking/toolCalls/assistantMessage/usage/finishReason）+ 标记本轮是否已流式发正文。
+    let chat: {
+      text: string; thinking?: string; toolCalls: ToolCall[]; finishReason: string;
+      usage?: { input: number; output: number }; assistantMessage: ChatMessage;
+    };
+    let streamedTextInfo: { messageId: string } | null = null;
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), PER_ROUND_TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await fetch(http.url, {
-        method: "POST",
-        signal: controller.signal,
-        headers: http.headers,
-        body: http.body,
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") {
-        consecutiveTimeouts++;
-        console.warn(LOG_PREFIX, "第 " + (round + 1) + " 轮 LLM 请求超时（" + PER_ROUND_TIMEOUT_MS + "ms），连续第 " + consecutiveTimeouts + " 次");
-        clearTimeout(timer);
-        // 连续超时即退出：再重试只会让上下文更长更慢，注定超时。
-        // 不再往 conversation 塞"超时提示"消息（雪上加霜），直接跳出走强制总结。
-        if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-          console.warn(LOG_PREFIX, "连续 " + MAX_CONSECUTIVE_TIMEOUTS + " 次超时，跳出 FC 循环走强制总结");
+    if (useStreaming) {
+      // —— 新增：真流式路径 ——
+      let streamResult: StreamRoundResult;
+      try {
+        streamResult = await streamOneRound(adapter, req, settings, observer, PER_ROUND_TIMEOUT_MS, round);
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          consecutiveTimeouts++;
+          console.warn(LOG_PREFIX, "第 " + (round + 1) + " 轮流式请求超时（" + PER_ROUND_TIMEOUT_MS + "ms），连续第 " + consecutiveTimeouts + " 次");
+          if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+            console.warn(LOG_PREFIX, "连续 " + MAX_CONSECUTIVE_TIMEOUTS + " 次超时，跳出 FC 循环走强制总结");
+            observer.next({ type: EventType.STEP_FINISHED, stepName: `round-${round + 1}` });
+            break;
+          }
           observer.next({ type: EventType.STEP_FINISHED, stepName: `round-${round + 1}` });
-          break;
+          continue;
         }
-        observer.next({ type: EventType.STEP_FINISHED, stepName: `round-${round + 1}` });
-        continue;
+        throw err;
       }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
+      chat = {
+        text: streamResult.text,
+        thinking: streamResult.thinking,
+        toolCalls: streamResult.toolCalls,
+        finishReason: streamResult.finishReason,
+        usage: streamResult.usage,
+        assistantMessage: streamResult.assistantMessage,
+      };
+      if (streamResult.textAlreadyStreamed && streamResult.streamedMessageId) {
+        streamedTextInfo = { messageId: streamResult.streamedMessageId };
+      }
+    } else {
+      // —— 原非流式路径（原样保留） ——
+      const http = adapter.buildRequest(req, settings);
+      console.log(LOG_PREFIX, "请求:", http.url);
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      console.error(LOG_PREFIX, "LLM 请求失败 HTTP " + response.status + ":", errorText.slice(0, 300));
-      throw new Error("模型请求失败：HTTP " + response.status + (errorText ? " — " + errorText.slice(0, 200) : ""));
-    }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), PER_ROUND_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await fetch(http.url, {
+          method: "POST",
+          signal: controller.signal,
+          headers: http.headers,
+          body: http.body,
+        });
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          consecutiveTimeouts++;
+          console.warn(LOG_PREFIX, "第 " + (round + 1) + " 轮 LLM 请求超时（" + PER_ROUND_TIMEOUT_MS + "ms），连续第 " + consecutiveTimeouts + " 次");
+          clearTimeout(timer);
+          // 连续超时即退出：再重试只会让上下文更长更慢，注定超时。
+          // 不再往 conversation 塞"超时提示"消息（雪上加霜），直接跳出走强制总结。
+          if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+            console.warn(LOG_PREFIX, "连续 " + MAX_CONSECUTIVE_TIMEOUTS + " 次超时，跳出 FC 循环走强制总结");
+            observer.next({ type: EventType.STEP_FINISHED, stepName: `round-${round + 1}` });
+            break;
+          }
+          observer.next({ type: EventType.STEP_FINISHED, stepName: `round-${round + 1}` });
+          continue;
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
 
-    const data = await response.json();
-    const chat = adapter.parseResponse(data);
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        console.error(LOG_PREFIX, "LLM 请求失败 HTTP " + response.status + ":", errorText.slice(0, 300));
+        throw new Error("模型请求失败：HTTP " + response.status + (errorText ? " — " + errorText.slice(0, 200) : ""));
+      }
+
+      const data = await response.json();
+      chat = adapter.parseResponse(data);
+    }
 
     if (chat.usage) {
       accInput += chat.usage.input;
@@ -227,6 +418,17 @@ async function runFcLoopWithEvents(
       " toolCalls=" + chat.toolCalls.length + " thinking=" + (chat.thinking ? "有" : "无") +
       " 耗时=" + (Date.now() - roundStart) + "ms",
     );
+
+    // 思考过程（DeepSeek reasoning_content / Anthropic thinking block 等）
+    // 非流式：整段一次性发 CUSTOM cyrene.thinking。
+    // 流式：streamOneRound 内部已边生成边发（append 语义），这里不再重复发。
+    if (!useStreaming && chat.thinking && chat.thinking.trim()) {
+      observer.next({
+        type: EventType.CUSTOM,
+        name: "cyrene.thinking",
+        value: { round: round + 1, text: chat.thinking },
+      } as BaseEvent);
+    }
 
     // 请求成功，重置连续超时计数
     consecutiveTimeouts = 0;
@@ -320,8 +522,12 @@ async function runFcLoopWithEvents(
     // 情况2：模型正常返回文本 → 发 TEXT_MESSAGE 流
     const content = chat.text || "";
     console.log(LOG_PREFIX, "Function Calling 完成，最终回复长度=" + content.length);
-    const textMessageId = `msg-${Date.now()}`;
-    emitTextMessage(observer, textMessageId, content);
+    // 流式路径已在 streamOneRound 内边收边发 TEXT_MESSAGE_*，这里不再重复发（否则正文翻倍）。
+    // 非流式路径照旧：一次性切片发出。
+    if (!streamedTextInfo) {
+      const textMessageId = `msg-${Date.now()}`;
+      emitTextMessage(observer, textMessageId, content);
+    }
 
     observer.next({ type: EventType.STEP_FINISHED, stepName: `round-${round + 1}` });
     const totalUsage = (accInput > 0 || accOutput > 0) ? { input: accInput, output: accOutput } : undefined;
@@ -369,6 +575,15 @@ async function runFcLoopWithEvents(
       accInput += chat.usage.input;
       accOutput += chat.usage.output;
       recordUsage(chat.usage.input, chat.usage.output, 1);
+    }
+
+    // 强制总结轮的思考过程也透传（与主循环一致）
+    if (chat.thinking && chat.thinking.trim()) {
+      observer.next({
+        type: EventType.CUSTOM,
+        name: "cyrene.thinking",
+        value: { round: 0, text: chat.thinking },
+      } as BaseEvent);
     }
 
     const textMessageId = `msg-${Date.now()}`;

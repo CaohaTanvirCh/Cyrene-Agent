@@ -1181,6 +1181,48 @@ body {
   30% { opacity: 1; }
 }
 
+/* ===== 思考过程折叠块（💭）：默认折叠，点击展开 ===== */
+.msg__thinking {
+  margin: 2px 0 6px;
+  max-width: 100%;
+  border: 1px dashed var(--rb-border-soft);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+.msg__thinking-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--rb-text-faint);
+  user-select: none;
+  transition: color 0.12s, background 0.12s;
+}
+.msg__thinking-summary::-webkit-details-marker { display: none; }
+.msg__thinking-summary::after {
+  content: "▾";
+  float: right;
+  transition: transform 0.15s;
+  opacity: 0.6;
+}
+.msg__thinking[open] .msg__thinking-summary::after { transform: rotate(180deg); }
+.msg__thinking-summary:hover {
+  color: var(--rb-pink-100);
+  background: rgba(255, 255, 255, 0.06);
+}
+.msg__thinking-body {
+  padding: 8px 12px;
+  border-top: 1px dashed var(--rb-border-faint);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--rb-text-faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
 /* 流式逐字渐显：每个字 span 从透明淡入，营造打字机渐显感 */
 .msg__char {
   display: inline;

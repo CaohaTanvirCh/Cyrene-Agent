@@ -372,6 +372,12 @@ interface GeneralSettings {
   launchAtLogin: boolean;
   language: "zh-CN";
   uiTheme: "classic" | "polished-pink" | "pearl-white";
+  /** 动态背景（粒子动画）开关。关闭可省性能。默认开。 */
+  dynamicBackground: boolean;
+  /** 是否显示模型思考过程（DeepSeek reasoning 等），默认显示。 */
+  showThinking: boolean;
+  /** 流式输出（思考+答案实时）。仅 OpenAI 兼容厂商生效。默认开。 */
+  streamingOutput: boolean;
   // TTS 配置
   ttsEngine: "off" | "minimax" | "gptsovits" | "custom-cloud" | "mimo";
   ttsAutoRead: boolean;
@@ -525,6 +531,9 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   launchAtLogin: false,
   language: "zh-CN",
   uiTheme: "classic",
+  dynamicBackground: true,
+  showThinking: true,
+  streamingOutput: true,
   ttsEngine: "off",
   ttsAutoRead: true,
   ttsSpeed: 1,
@@ -927,6 +936,9 @@ function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undef
     launchAtLogin: Boolean(input?.launchAtLogin),
     language: "zh-CN",
     uiTheme: input?.uiTheme === "pearl-white" ? "pearl-white" : input?.uiTheme === "polished-pink" ? "polished-pink" : "classic",
+    dynamicBackground: input?.dynamicBackground === undefined ? DEFAULT_GENERAL_SETTINGS.dynamicBackground : Boolean(input.dynamicBackground),
+    showThinking: input?.showThinking === undefined ? DEFAULT_GENERAL_SETTINGS.showThinking : Boolean(input.showThinking),
+    streamingOutput: input?.streamingOutput === undefined ? DEFAULT_GENERAL_SETTINGS.streamingOutput : Boolean(input.streamingOutput),
     // TTS 配置
     ttsEngine: (["off", "minimax", "gptsovits", "custom-cloud", "mimo"].includes(input?.ttsEngine as string) ? input?.ttsEngine : "off") as GeneralSettings["ttsEngine"],
     ttsAutoRead: input?.ttsAutoRead === undefined ? DEFAULT_GENERAL_SETTINGS.ttsAutoRead : Boolean(input.ttsAutoRead),
@@ -3913,6 +3925,8 @@ app.whenReady().then(async () => {
     normalizeChatMessages: ((raw: ReadonlyArray<unknown>) =>
       normalizeChatMessages(raw as any)) as BuildOptionsDeps["normalizeChatMessages"],
     chatRequestTimeoutMs: CHAT_REQUEST_TIMEOUT_MS,
+    // 流式输出开关（通用设置），仅 OpenAI transport 生效；由 cyrene-agent 内部再判 transport
+    loadStreamingOutput: () => loadGeneralSettings().streamingOutput !== false,
   };
   const onRunFinishedDeps: OnRunFinishedDeps = {
     loadModelSettings: () => loadModelSettings(),

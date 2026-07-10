@@ -248,13 +248,36 @@
               </div>
             </label>
 
+            <label class="setting-row">
+              <div>
+                <strong>动态背景</strong>
+                <span>聊天/通话窗口的漂浮粒子动画。关闭可降低性能占用。</span>
+              </div>
+              <span class="switch"><input id="dynamic-background" type="checkbox" checked /><span class="switch__track"><span class="switch__thumb"></span></span></span>
+            </label>
+
+            <label class="setting-row">
+              <div>
+                <strong>显示思考过程</strong>
+                <span>展示模型的推理过程（如 DeepSeek reasoning），默认折叠。</span>
+              </div>
+              <span class="switch"><input id="show-thinking" type="checkbox" checked /><span class="switch__track"><span class="switch__thumb"></span></span></span>
+            </label>
+
+            <label class="setting-row">
+              <div>
+                <strong>流式输出</strong>
+                <span>思考与答案边生成边显示（仅 OpenAI 兼容厂商如 DeepSeek 生效）。关闭则整段一次性显示。</span>
+              </div>
+              <span class="switch"><input id="streaming-output" type="checkbox" checked /><span class="switch__track"><span class="switch__thumb"></span></span></span>
+            </label>
+
             <div class="setting-row">
               <div>
                 <strong>界面主题</strong>
                 <span>默认保持当前外观；暗系更清透；白调是柔和珍珠白。</span>
               </div>
-              <div class="option-blocks theme-options" id="ui-theme-select" role="radiogroup" aria-label="界面主题">
-                <button type="button" class="option-block is-active" data-theme="classic" aria-pressed="true">
+              <div class="option-blocks theme-options" id="ui-theme-select" role="radiogroup" aria-label="界面主题">                <button type="button" class="option-block is-active" data-theme="classic" aria-pressed="true">
                   <span class="theme-swatch theme-swatch--classic" aria-hidden="true"></span>
                   <span>默认</span>
                 </button>

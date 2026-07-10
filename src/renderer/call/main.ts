@@ -64,7 +64,19 @@ function drawParticles(): void {
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.fill();
   }
-  requestAnimationFrame(drawParticles);
+  // 旧逻辑：无条件 rAF。改为受 particlesRafId 控制，可被动态背景开关停掉。
+  particlesRafId = requestAnimationFrame(drawParticles);
+}
+
+// 动态背景开关：可启停粒子 rAF，关闭时清空 canvas 省性能。
+let particlesRafId: number | null = null;
+function startParticles(): void {
+  if (!ctx || particlesRafId !== null) return;
+  particlesRafId = requestAnimationFrame(drawParticles);
+}
+function stopParticles(): void {
+  if (particlesRafId !== null) { cancelAnimationFrame(particlesRafId); particlesRafId = null; }
+  if (ctx) ctx.clearRect(0, 0, particlesW, particlesH);
 }
 
 // ── DOM 元素 ──
@@ -533,8 +545,16 @@ async function init(): Promise<void> {
   if (canvas && ctx) {
     resizeParticles();
     for (let i = 0; i < PARTICLE_COUNT; i++) particles.push(spawnParticle());
-    requestAnimationFrame(drawParticles);
+    // 旧逻辑：无条件 requestAnimationFrame(drawParticles)。
+    // 新逻辑：按通用设置的动态背景开关决定是否启动。
+    startParticles();
     window.addEventListener("resize", resizeParticles);
+    void (async () => {
+      try {
+        const g = await (window as unknown as { settings?: { getGeneral?: () => Promise<{ dynamicBackground?: boolean }> } }).settings?.getGeneral?.();
+        if (g && g.dynamicBackground === false) stopParticles();
+      } catch { /* 读不到保持默认开启 */ }
+    })();
   }
 
   // 波形 canvas

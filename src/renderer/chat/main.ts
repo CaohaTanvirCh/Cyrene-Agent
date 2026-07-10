@@ -19,6 +19,8 @@ interface Message {
   at: number;
   sticker?: string | null;
   thinking?: boolean;
+  /** 思考过程文本（DeepSeek reasoning 等）。瞬态、不持久化，前端渲染成折叠块。 */
+  thinkingText?: string;
   ttsCacheKey?: string;
 }
 
@@ -280,6 +282,8 @@ function getStickerSrc(id: string): string | undefined {
 const messages: Message[] = [];
 let currentSessionId: string | null = null;
 let currentModelConfig: ModelConfig | null = null;
+// 是否显示模型思考过程（DeepSeek reasoning 等）。由通用设置控制，默认显示。
+let showThinking = true;
 
 function formatModelHint(config: ModelConfig | null): string {
   if (!config || !config.connected) return "模型未连接";
@@ -996,6 +1000,41 @@ function setAvatar(slot: HTMLElement, role: Role): void {
   slot.appendChild(img);
 }
 
+/** 构建一个默认折叠的「💭 思考过程」块（<details>）。 */
+function buildThinkingBlock(text: string): HTMLElement {
+  const details = document.createElement("details");
+  details.className = "msg__thinking";
+  const summary = document.createElement("summary");
+  summary.className = "msg__thinking-summary";
+  summary.textContent = "💭 思考过程";
+  const pre = document.createElement("div");
+  pre.className = "msg__thinking-body";
+  pre.textContent = text;
+  details.appendChild(summary);
+  details.appendChild(pre);
+  return details;
+}
+
+/**
+ * 流式期间就地更新当前消息的思考块（不整屏 render）。
+ * 若该消息行还没建立 DOM（仍是 thinking 三点气泡），则跳过，等 render 时统一渲染。
+ */
+function upsertThinkingBlock(m: Message): void {
+  const row = messagesEl.querySelector(`[data-msg-id="${m.id}"]`);
+  if (!row) return;
+  const body = row.querySelector(".msg__body");
+  if (!body) return;
+  let details = body.querySelector(".msg__thinking") as HTMLDetailsElement | null;
+  if (!details) {
+    details = buildThinkingBlock(m.thinkingText ?? "") as HTMLDetailsElement;
+    body.insertBefore(details, body.firstChild);
+  } else {
+    const pre = details.querySelector(".msg__thinking-body");
+    if (pre) pre.textContent = m.thinkingText ?? "";
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 function render(): void {
   // 空态：当前会话还没有消息时（新建/全清）显示"昔涟期待与你聊天哦 ✨"占位
   // thinking 状态（昔涟主动开场/流式回复中）也算有消息，胶囊应立即消失
@@ -1043,6 +1082,11 @@ function render(): void {
     const time = document.createElement("div");
     time.className = "msg__time";
     time.textContent = formatTime(m.at);
+
+    // 思考过程折叠块（若有且开关开启）：放在气泡上方，默认折叠
+    if (m.role === "model" && showThinking && m.thinkingText && m.thinkingText.trim()) {
+      body.appendChild(buildThinkingBlock(m.thinkingText));
+    }
 
     if (!bubble.hidden) body.appendChild(bubble);
 
@@ -2542,6 +2586,12 @@ async function send(): Promise<void> {
         switch (event.type) {
           case "TOOL_CALL_START": {
             // 工具调用开始：在 thinking 气泡里显示"🔧 调用中：xxx"，替换三个点
+            // 流式路径下，本轮工具调用前可能有过程文本（已入 deltaQueue/已渲染），
+            // 先清空回放队列并停掉计时器 + 重置累积，避免残留字符盖在工具提示后面。
+            deltaQueue.length = 0;
+            if (playbackTimer !== null) { clearInterval(playbackTimer); playbackTimer = null; }
+            streamContent = "";
+            ttsContent = "";
             const bubble = getStreamingBubble();
             if (bubble) {
               bubble.classList.remove("msg__bubble--thinking");
@@ -2604,9 +2654,28 @@ async function send(): Promise<void> {
             }
             break;
           case "CUSTOM":
-            // 主进程发的自定义事件：sticker / 天气卡片 / 任务清单 / 选择卡片
+            // 主进程发的自定义事件：sticker / 天气卡片 / 任务清单 / 选择卡片 / 思考过程
             if (event.name === "cyrene.sticker") {
               sticker = (event.value as StickerId | null) ?? null;
+            } else if (event.name === "cyrene.thinking") {
+              // 思考过程：支持两种形态——
+              //  - 非流式：{ round, text }  整段一次性到达
+              //  - 流式：  { round, delta, append, start } 逐块到达
+              const tv = event.value as { round?: number; text?: string; delta?: string; append?: boolean; start?: boolean } | null;
+              if (tv && msg) {
+                if (tv.append && typeof tv.delta === "string") {
+                  // 流式增量：新一轮（start=true）之间用空行分隔，避免多轮思考粘连
+                  if (tv.start && msg.thinkingText) msg.thinkingText += "\n\n";
+                  msg.thinkingText = (msg.thinkingText ?? "") + tv.delta;
+                  if (showThinking) upsertThinkingBlock(msg);
+                } else {
+                  const piece = tv.text?.trim();
+                  if (piece) {
+                    msg.thinkingText = msg.thinkingText ? msg.thinkingText + "\n\n" + piece : piece;
+                    if (showThinking) upsertThinkingBlock(msg);
+                  }
+                }
+              }
             } else if (event.name === "cyrene.weather") {
               // 暂存天气数据，等 runDone 后 render 再插入（避免 render 的 replaceChildren 清掉卡片）
               console.log("[Chat] 收到天气卡片数据:", JSON.stringify(event.value)?.slice(0, 100));
@@ -2998,14 +3067,51 @@ function drawParticles(): void {
     particlesCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
     particlesCtx.fill();
   }
-  requestAnimationFrame(drawParticles);
+  // 旧逻辑：无条件持续 rAF。改为受 particlesRafId 控制，可被 stopParticles 停掉。
+  particlesRafId = requestAnimationFrame(drawParticles);
+}
+
+// 动态背景开关：可启停粒子 rAF 循环，关闭时清空 canvas 省性能。
+let particlesRafId: number | null = null;
+function startParticles(): void {
+  if (!particlesCtx) return;
+  if (particlesRafId !== null) return; // 已在运行
+  if (particles.length === 0) {
+    particles = Array.from({ length: PARTICLE_COUNT }, spawnParticle);
+  }
+  particlesRafId = requestAnimationFrame(drawParticles);
+}
+function stopParticles(): void {
+  if (particlesRafId !== null) {
+    cancelAnimationFrame(particlesRafId);
+    particlesRafId = null;
+  }
+  if (particlesCtx) particlesCtx.clearRect(0, 0, particlesW, particlesH);
+}
+function setDynamicBackground(enabled: boolean): void {
+  if (enabled) startParticles();
+  else stopParticles();
 }
 
 if (particlesCtx) {
   resizeParticles();
   particles = Array.from({ length: PARTICLE_COUNT }, spawnParticle);
-  requestAnimationFrame(drawParticles);
+  // 旧逻辑：直接 requestAnimationFrame(drawParticles) 无条件启动。
+  // 新逻辑：默认启动，稍后 initGeneralPrefs() 根据设置决定是否停掉。
+  startParticles();
   window.addEventListener("resize", resizeParticles);
+}
+
+// 通用偏好（动态背景 / 显示思考）：启动时读一次，并在设置变更时实时应用。
+async function initGeneralPrefs(): Promise<void> {
+  try {
+    const g = await window.settings?.getGeneral?.() as { dynamicBackground?: boolean; showThinking?: boolean } | undefined;
+    if (g) {
+      setDynamicBackground(g.dynamicBackground !== false);
+      showThinking = g.showThinking !== false;
+      render();
+    }
+  } catch { /* 读不到就保持默认（都开启） */ }
 }
 
 
@@ -3019,7 +3125,11 @@ void (async () => {
   installSchedulerEventListener();
   void initModelConfig();
   void initWorkspace();
+  void initGeneralPrefs();
 })();
+
+// 设置窗口保存后，聊天窗重新聚焦时刷新一次通用偏好（动态背景 / 显示思考）
+window.addEventListener("focus", () => { void initGeneralPrefs(); });
 
 // main → renderer：权限审批请求（per-action 档位下工具调用前）
 // 插入一张审批卡片到聊天流；用户点同意/拒绝后回传给主进程。

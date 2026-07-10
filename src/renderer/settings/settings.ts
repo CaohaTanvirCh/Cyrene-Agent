@@ -267,6 +267,9 @@ interface GeneralSettings {
   launchAtLogin: boolean;
   language: "zh-CN";
   uiTheme: "classic" | "polished-pink" | "pearl-white";
+  dynamicBackground: boolean;
+  showThinking: boolean;
+  streamingOutput: boolean;
 }
 
 interface UserApi {
@@ -477,7 +480,7 @@ if (!window.settings) {
         stickerSize: "standard",
       }),
     saveConfig: (c) => Promise.resolve(c as ModelSettings),
-    getGeneral: () => Promise.resolve({ musicEnabled: false, musicVolume: 60, soundEnabled: true, soundVolume: 70, petAlwaysOnTop: true, petVisible: true, petZoom: 1, sidebarVisible: true, tasksVisible: true, launchAtLogin: false, language: "zh-CN", uiTheme: "classic" }),
+    getGeneral: () => Promise.resolve({ musicEnabled: false, musicVolume: 60, soundEnabled: true, soundVolume: 70, petAlwaysOnTop: true, petVisible: true, petZoom: 1, sidebarVisible: true, tasksVisible: true, launchAtLogin: false, language: "zh-CN", uiTheme: "classic", dynamicBackground: true, showThinking: true, streamingOutput: true }),
     saveGeneral: (c) => Promise.resolve(c as GeneralSettings),
     openSidebar: () => {},
     closeSidebar: () => {},
@@ -607,6 +610,9 @@ const petVisibleInput = document.getElementById("pet-visible") as HTMLInputEleme
 const petZoomInput = document.getElementById("pet-zoom") as HTMLInputElement;
 const petZoomVal = document.getElementById("pet-zoom-val") as HTMLElement;
 const launchAtLoginInput = document.getElementById("launch-at-login") as HTMLInputElement;
+const dynamicBackgroundInput = document.getElementById("dynamic-background") as HTMLInputElement;
+const showThinkingInput = document.getElementById("show-thinking") as HTMLInputElement;
+const streamingOutputInput = document.getElementById("streaming-output") as HTMLInputElement;
 const uiThemeSelect = document.getElementById("ui-theme-select") as HTMLElement;
 const languageSelect = document.getElementById("language-select") as HTMLElement;
 const sidebarVisibleInput = document.getElementById("sidebar-visible") as HTMLInputElement;
@@ -954,6 +960,9 @@ async function loadGeneralSettings(): Promise<void> {
     sidebarVisibleInput.checked = cfg.sidebarVisible ?? true;
     tasksVisibleInput.checked = cfg.tasksVisible ?? true;
     launchAtLoginInput.checked = cfg.launchAtLogin;
+    dynamicBackgroundInput.checked = cfg.dynamicBackground !== false;
+    showThinkingInput.checked = cfg.showThinking !== false;
+    streamingOutputInput.checked = cfg.streamingOutput !== false;
     applyUiThemeSelection(normalizeUiTheme(cfg.uiTheme));
     applyLanguageSelection("zh-CN");
     setGeneralSaveStatus("等待保存");
@@ -1012,6 +1021,9 @@ musicVolumeInput.addEventListener("input", () => {
 
 soundEnabledInput.addEventListener("change", () => setGeneralSaveStatus("有未保存的更改"));
 soundVolumeInput.addEventListener("input", () => setGeneralSaveStatus("有未保存的更改"));
+dynamicBackgroundInput.addEventListener("change", () => setGeneralSaveStatus("有未保存的更改"));
+showThinkingInput.addEventListener("change", () => setGeneralSaveStatus("有未保存的更改"));
+streamingOutputInput.addEventListener("change", () => setGeneralSaveStatus("有未保存的更改"));
 
 petAlwaysOnTopInput.addEventListener("change", () => window.settings?.setPetAlwaysOnTop(petAlwaysOnTopInput.checked));
 petVisibleInput.addEventListener("change", () => window.settings?.setPetVisible(petVisibleInput.checked));
@@ -1856,6 +1868,9 @@ generalForm.addEventListener("submit", async (e) => {
       launchAtLogin: launchAtLoginInput.checked,
       language: "zh-CN",
       uiTheme: getUiThemeValue(),
+      dynamicBackground: dynamicBackgroundInput.checked,
+      showThinking: showThinkingInput.checked,
+      streamingOutput: streamingOutputInput.checked,
     });
     setGeneralSaveStatus("已保存", "is-ok");
   } catch {

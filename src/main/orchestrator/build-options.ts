@@ -71,6 +71,8 @@ export interface BuildOptionsDeps {
   logWorldbookInjection: (alwaysOnContext: string, systemContent: string) => void;
   normalizeChatMessages: (raw: ReadonlyArray<unknown>) => ChatMessage[];
   chatRequestTimeoutMs: number;
+  /** 读取"流式输出"开关（通用设置）。缺省视为关闭。 */
+  loadStreamingOutput?: () => boolean;
 }
 
 /** onRunFinished 副作用所需的 deps（与 BuildOptionsDeps 部分重叠） */
@@ -257,6 +259,7 @@ export async function buildAgentRunOptions(
       },
       messages: fcMessages,
       timeoutMs: deps.chatRequestTimeoutMs,
+      streamingOutput: deps.loadStreamingOutput ? deps.loadStreamingOutput() : false,
       ...(isTalkMode ? { tools: [] as ToolDefinition[] } : {}),
     },
     latestUserText,
