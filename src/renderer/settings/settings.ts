@@ -447,6 +447,18 @@ const MODEL_PRESETS: ModelPreset[] = [
     // 在专属 vendor adapter 接好之前先 disabled，避免用户选到后调用直接报 4xx。
     disabled: true,
   },
+  // 本地小模型（如 Gemma / Qwen 等）：通过本地 OpenAI 兼容服务接入。
+  // 用户用 Ollama / LM Studio / llama.cpp server 等在本机起服务。
+  // baseUrl 指向本机 OpenAI 兼容入口；apiKey 一般留空即可（本地服务通常不校验）。
+  {
+    providerName: "本地模型（Local）",
+    shortName: "本地模型",
+    baseUrl: "http://localhost:11434/v1",
+    // 常见本地小模型型号建议；用户可手填自己拉取的模型名（如 gemma3:4b / qwen2.5:7b）。
+    mainModels: ["gemma3", "gemma3:4b", "qwen2.5:7b", "llama3.2"],
+    iconUrl: "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/ollama.svg",
+    websiteUrl: "https://ollama.com/",
+  },
 ];
 
 if (!window.settings) {
@@ -745,6 +757,22 @@ function findPreset(providerName: string): ModelPreset {
   // 不直接返回 MODEL_PRESETS[0] 是为了未来若把首项改成 disabled 也仍然合法。
   const fallback = MODEL_PRESETS.find((preset) => !preset.disabled) ?? MODEL_PRESETS[0];
   return MODEL_PRESETS.find((preset) => preset.providerName === providerName) ?? fallback;
+}
+
+/**
+ * 判断 baseUrl 是否指向本机（本地 OpenAI 兼容服务，如 Ollama / LM Studio / llama.cpp）。
+ * 本地服务通常不校验 apiKey，据此在"测试连接"时放宽 key 必填校验。
+ */
+function isLocalBaseUrl(baseUrl: string): boolean {
+  const t = (baseUrl || "").trim().toLowerCase();
+  if (!t) return false;
+  return (
+    t.includes("localhost") ||
+    t.includes("127.0.0.1") ||
+    t.includes("0.0.0.0") ||
+    t.includes("::1") ||
+    /\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(t)
+  );
 }
 
 /**
@@ -1624,7 +1652,10 @@ if (testConnectionBtn) {
     const baseUrl = baseUrlInput.value;
     const model = getCurrentModelValue().trim();
     const apiKey = apiKeyInput.value;
-    if (!apiKey) { setSaveStatus("请先填写 API Key 再测试", "is-error"); return; }
+    // 旧逻辑：无 apiKey 一律拦截
+    // if (!apiKey) { setSaveStatus("请先填写 API Key 再测试", "is-error"); return; }
+    // 新逻辑：本地模型（baseUrl 指向本机）通常不需要 apiKey，跳过该校验。
+    if (!apiKey && !isLocalBaseUrl(baseUrl)) { setSaveStatus("请先填写 API Key 再测试", "is-error"); return; }
     if (!model) { setSaveStatus("请先选择/填写模型再测试", "is-error"); return; }
     setSaveStatus("测试连接中…");
     testConnectionBtn.disabled = true;

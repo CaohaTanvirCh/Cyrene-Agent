@@ -131,6 +131,25 @@ export const PROVIDER_CAPABILITIES: ProviderCapability[] = [
     supportsVision: true,
     disabled: true,
   },
+  // 本地小模型（如 Gemma / Qwen 等）：通过本地 OpenAI 兼容服务接入。
+  // 用户用 Ollama / LM Studio / llama.cpp server 等在本机起服务，
+  // baseUrl 指向 http://localhost:xxxx/v1，apiKey 通常不需要（留空即可）。
+  {
+    id: "local",
+    displayName: "本地模型（Local）",
+    transport: "openai",
+    // Ollama 默认 OpenAI 兼容入口；LM Studio 默认 http://localhost:1234/v1
+    baseUrl: "http://localhost:11434/v1",
+    authStyle: "bearer",
+    defaultModel: "gemma3",
+    supportsTools: true,
+    // 本地小模型能力参差不齐，思考/视觉保守关闭，避免误判
+    supportsThinking: false,
+    thinkingField: null,
+    cacheStrategy: "none",
+    testStrategy: "text",
+    supportsVision: false,
+  },
 ];
 
 const byDisplayName = new Map(PROVIDER_CAPABILITIES.map(c => [c.displayName, c]));

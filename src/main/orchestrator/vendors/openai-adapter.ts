@@ -69,13 +69,27 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
       body.tool_choice = "auto";
     }
     if (req.extraBody) Object.assign(body, req.extraBody);
+    // 旧逻辑：无条件带 Authorization 头
+    // return {
+    //   url: buildUrl(cfg.baseUrl),
+    //   method: "POST",
+    //   headers: {
+    //     "Content-Type": "application/json",
+    //     Authorization: `Bearer ${cfg.apiKey}`,
+    //   },
+    //   body: JSON.stringify(body),
+    // };
+    // 新逻辑：apiKey 为空时不发送 Authorization 头。
+    // 本地 OpenAI 兼容服务（Ollama / LM Studio / llama.cpp）通常不校验 key，
+    // 带一个 `Bearer ` 空头反而可能被某些服务拒绝。
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (cfg.apiKey && cfg.apiKey.trim()) {
+      headers.Authorization = `Bearer ${cfg.apiKey}`;
+    }
     return {
       url: buildUrl(cfg.baseUrl),
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cfg.apiKey}`,
-      },
+      headers,
       body: JSON.stringify(body),
     };
   }

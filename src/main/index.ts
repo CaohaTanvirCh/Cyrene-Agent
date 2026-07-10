@@ -574,7 +574,21 @@ function getSettingsPath(): string {
   return path.join(app.getPath("userData"), "model-settings.json");
 }
 
-function getGeneralSettingsPath(): string {
+/**
+ * 判断 baseUrl 是否指向本机（本地 OpenAI 兼容服务，如 Ollama / LM Studio / llama.cpp）。
+ * 本地服务通常不校验 apiKey，据此放宽"必须填 API Key"的校验。
+ */
+function isLocalModelEndpoint(baseUrl: string): boolean {
+  const t = (baseUrl || "").trim().toLowerCase();
+  if (!t) return false;
+  return (
+    t.includes("localhost") ||
+    t.includes("127.0.0.1") ||
+    t.includes("0.0.0.0") ||
+    t.includes("::1") ||
+    /\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(t)
+  );
+}function getGeneralSettingsPath(): string {
   return path.join(app.getPath("userData"), "app-settings.json");
 }
 
@@ -1677,7 +1691,12 @@ async function observeRuntimeState(
 
 async function requestModelReply(inputMessages: unknown, styleFile = "01_default.md"): Promise<ChatReplyPayload> {
   const settings = loadModelSettings();
-  if (!settings.apiKey) {
+  // 旧逻辑：无 apiKey 一律报错
+  // if (!settings.apiKey) {
+  //   throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
+  // }
+  // 新逻辑：本地模型（baseUrl 指向本机）通常不需要 apiKey，仅云端厂商强制要求。
+  if (!settings.apiKey && !isLocalModelEndpoint(settings.baseUrl)) {
     throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
   }
 
@@ -3795,7 +3814,9 @@ app.whenReady().then(async () => {
   const schedulerRunner = createSchedulerRunner({
     buildOptions: async (task: ScheduledTask) => {
       const settings = loadModelSettings();
-      if (!settings.apiKey) throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
+      // 旧逻辑：if (!settings.apiKey) throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
+      // 新逻辑：本地模型（baseUrl 指向本机）通常不需要 apiKey。
+      if (!settings.apiKey && !isLocalModelEndpoint(settings.baseUrl)) throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
       const messages = [{ role: "user" as const, content: task.prompt }];
       let alwaysOnContext = "";
       try {

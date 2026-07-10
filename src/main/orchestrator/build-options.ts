@@ -27,6 +27,23 @@ import type { AguiRunInput } from "../agui-bridge";
 import { IPC } from "../../shared/ipc-channels";
 import type { RelationshipChannel, RelationshipTurnInput } from "../relationship/relationship-log";
 
+/**
+ * 判断 baseUrl 是否指向本机（本地 OpenAI 兼容服务，如 Ollama / LM Studio / llama.cpp）。
+ * 本地服务通常不校验 apiKey，因此这些地址允许 apiKey 留空。
+ */
+function isLocalEndpoint(baseUrl: string): boolean {
+  const t = (baseUrl || "").trim().toLowerCase();
+  if (!t) return false;
+  return (
+    t.includes("localhost") ||
+    t.includes("127.0.0.1") ||
+    t.includes("0.0.0.0") ||
+    t.includes("::1") ||
+    // 局域网常见网段（用户在另一台机器跑本地服务的情况）
+    /\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(t)
+  );
+}
+
 /** index.ts 模块级符号的最小可注入子集。
  *  类型故意用宽签名（unknown / 任意 shape）—— 因为 build-options 是纯消费者，
  *  实际调用时由 index.ts 注入真实的强类型函数。这避免循环类型依赖。 */
@@ -138,7 +155,13 @@ export async function buildAgentRunOptions(
   deps: BuildOptionsDeps,
 ): Promise<{ options: CyreneRunOptions; latestUserText: string }> {
   const settings = deps.loadModelSettings();
-  if (!settings.apiKey) {
+  // 旧逻辑：无 apiKey 一律报错（云端厂商必须要 key）
+  // if (!settings.apiKey) {
+  //   throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
+  // }
+  // 新逻辑：本地 OpenAI 兼容服务（Ollama / LM Studio / llama.cpp 等）通常不需要 apiKey，
+  // 只有当 baseUrl 不是本地地址时才强制要求填 key。
+  if (!settings.apiKey && !isLocalEndpoint(settings.baseUrl)) {
     throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
   }
   const messages = deps.normalizeChatMessages(input.messages);
