@@ -21,6 +21,9 @@ interface Message {
   thinking?: boolean;
   /** 思考过程文本（DeepSeek reasoning 等）。瞬态、不持久化，前端渲染成折叠块。 */
   thinkingText?: string;
+  /** 本轮 AI 是否调用了写类/副作用工具（写文件/改文件/跑命令/发邮件等）。
+   *  为 true 时禁止"重新生成/编辑重发"，避免重复副作用。 */
+  usedWriteTool?: boolean;
   ttsCacheKey?: string;
 }
 
@@ -118,6 +121,7 @@ interface AguiBaseEvent {
   role?: string;
   toolCallId?: string;
   toolCallName?: string;
+  toolRisk?: string; // 工具危险等级：safe/fs-read/fs-write/shell/network/input-control
   content?: string;
   error?: string;
   stepName?: string;
@@ -127,6 +131,11 @@ interface AguiBaseEvent {
   schedulerTaskId?: string;
   name?: string;   // CUSTOM 事件的 name
   value?: unknown; // CUSTOM 事件的 value
+}
+
+/** 写类/副作用工具的 risk 等级：这些工具会改磁盘/系统状态，重发会重复副作用。 */
+function isWriteRisk(risk?: string): boolean {
+  return risk === "fs-write" || risk === "shell" || risk === "input-control";
 }
 
 /** 文件摄入结果（与 main 侧 file-ingest.ts 的 Attachment 对齐）。 */
@@ -385,6 +394,7 @@ interface ChatStoreSession {
     at: number;
     sticker?: string | null;
     ttsCacheKey?: string;
+    usedWriteTool?: boolean;
   }>;
   createdAt: number;
   updatedAt: number;
@@ -428,7 +438,7 @@ interface WorkspaceApi {
 // - 过滤空 content / 渲染中的 thinking 占位（thinking=true 时通常 content 为空，但保险起见双重过滤）
 // - 丢弃 thinking 字段（持久化层不存这种瞬态状态）
 function toPersistableMessages(arr: Message[]): Array<{
-  id: string; role: Role; content: string; at: number; sticker?: StickerId | null; ttsCacheKey?: string;
+  id: string; role: Role; content: string; at: number; sticker?: StickerId | null; ttsCacheKey?: string; usedWriteTool?: boolean;
 }> {
   return arr
     .filter((m) => m && (m.role === "user" || m.role === "model") && typeof m.content === "string" && m.content.trim() && !m.thinking)
@@ -439,6 +449,7 @@ function toPersistableMessages(arr: Message[]): Array<{
       at: m.at,
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
+      ...(m.usedWriteTool ? { usedWriteTool: true } : {}),
     }));
 }
 
@@ -463,6 +474,7 @@ function loadSessionIntoUI(session: ChatStoreSession): void {
       at: m.at,
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
+      usedWriteTool: m.usedWriteTool,
     });
   }
   // 上报活跃 sessionId（设置面板"删除当前会话"差异化提示用）
@@ -471,6 +483,123 @@ function loadSessionIntoUI(session: ChatStoreSession): void {
   // 切换会话后刷新侧栏列表的活跃高亮
   void renderRailList();
 }
+
+// ══════════════════════════════════════════════════════════════
+// 通用右键/悬停菜单：一个浮层，按传入的菜单项渲染，点击外部关闭。
+// 供会话侧栏项、单条消息复用。
+// ══════════════════════════════════════════════════════════════
+interface CtxMenuItem {
+  label: string;
+  icon?: string;
+  danger?: boolean;
+  onClick: () => void;
+}
+
+let ctxMenuEl: HTMLElement | null = null;
+
+function closeContextMenu(): void {
+  if (ctxMenuEl) {
+    ctxMenuEl.remove();
+    ctxMenuEl = null;
+    document.removeEventListener("click", onDocClickCloseMenu, true);
+    document.removeEventListener("keydown", onEscCloseMenu, true);
+    window.removeEventListener("blur", closeContextMenu);
+  }
+}
+function onDocClickCloseMenu(e: MouseEvent): void {
+  if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) closeContextMenu();
+}
+function onEscCloseMenu(e: KeyboardEvent): void {
+  if (e.key === "Escape") closeContextMenu();
+}
+
+/** 在 (x,y) 处弹出上下文菜单。会自动避免超出视口。 */
+function openContextMenu(x: number, y: number, items: CtxMenuItem[]): void {
+  closeContextMenu();
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  for (const it of items) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "ctx-menu__item" + (it.danger ? " ctx-menu__item--danger" : "");
+    if (it.icon) {
+      const ic = document.createElement("span");
+      ic.className = "ctx-menu__icon";
+      ic.textContent = it.icon;
+      row.appendChild(ic);
+    }
+    const lb = document.createElement("span");
+    lb.textContent = it.label;
+    row.appendChild(lb);
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeContextMenu();
+      it.onClick();
+    });
+    menu.appendChild(row);
+  }
+  menu.style.visibility = "hidden";
+  document.body.appendChild(menu);
+  // 避免超出视口
+  const rect = menu.getBoundingClientRect();
+  const px = Math.min(x, window.innerWidth - rect.width - 8);
+  const py = Math.min(y, window.innerHeight - rect.height - 8);
+  menu.style.left = Math.max(8, px) + "px";
+  menu.style.top = Math.max(8, py) + "px";
+  menu.style.visibility = "";
+  ctxMenuEl = menu;
+  // 延迟挂监听，避免本次触发的 click 立即关闭
+  setTimeout(() => {
+    document.addEventListener("click", onDocClickCloseMenu, true);
+    document.addEventListener("keydown", onEscCloseMenu, true);
+    window.addEventListener("blur", closeContextMenu);
+  }, 0);
+}
+
+/** 轻量输入弹窗（Electron 禁用了 window.prompt，自实现）。返回 null=取消。 */
+function showChatInputModal(opts: { title: string; defaultValue?: string; placeholder?: string }): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "chat-modal-overlay";
+    const box = document.createElement("div");
+    box.className = "chat-modal";
+    const h = document.createElement("div");
+    h.className = "chat-modal__title";
+    h.textContent = opts.title;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "chat-modal__input";
+    input.value = opts.defaultValue ?? "";
+    input.placeholder = opts.placeholder ?? "";
+    const actions = document.createElement("div");
+    actions.className = "chat-modal__actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "chat-modal__btn";
+    cancel.textContent = "取消";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "chat-modal__btn chat-modal__btn--primary";
+    ok.textContent = "确定";
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    box.appendChild(h);
+    box.appendChild(input);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    const cleanup = (val: string | null) => { overlay.remove(); resolve(val); };
+    cancel.addEventListener("click", () => cleanup(null));
+    ok.addEventListener("click", () => cleanup(input.value));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(null); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); cleanup(input.value); }
+      else if (e.key === "Escape") { e.preventDefault(); cleanup(null); }
+    });
+    setTimeout(() => { input.focus(); input.select(); }, 30);
+  });
+}
+
 
 // ── 会话侧栏（点左上角 loader 展开）──
 // 精简版：+新对话 / 列表点击切换 / 活跃高亮。改名删除留设置面板。
@@ -531,12 +660,201 @@ function buildRailItem(session: ChatSessionMetaUI): HTMLLIElement {
     if (full) loadSessionIntoUI(full as ChatStoreSession);
   });
 
+  // 右键菜单：重命名 / 删除
+  li.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    openSessionMenu(session, e.clientX, e.clientY);
+  });
+
   li.appendChild(titleEl);
   li.appendChild(metaEl);
   return li;
 }
 
-// loader 按钮 toggle 侧栏显隐
+/** 会话项菜单：重命名 / 删除。 */
+function openSessionMenu(session: ChatSessionMetaUI, x: number, y: number): void {
+  openContextMenu(x, y, [
+    {
+      label: "重命名", icon: "✏️",
+      onClick: async () => {
+        const name = await showChatInputModal({ title: "重命名会话", defaultValue: session.title || "" });
+        if (name === null) return;
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        try {
+          await window.chatStore?.rename(session.id, trimmed);
+          await renderRailList();
+        } catch (err) { console.warn("[Cyrene Chat] 重命名失败:", err); }
+      },
+    },
+    {
+      label: "删除", icon: "🗑", danger: true,
+      onClick: async () => {
+        const ok = window.confirm(`删除会话「${session.title || "新对话"}」？此操作不可撤销。`);
+        if (!ok) return;
+        try {
+          await window.chatStore?.delete(session.id);
+          // 删的是当前会话：切到一个新会话或空态
+          if (session.id === currentSessionId) {
+            const created = await window.chatStore?.create({ identityId: null });
+            if (created?.id) {
+              const full = await window.chatStore?.get(created.id);
+              if (full) loadSessionIntoUI(full as ChatStoreSession);
+            }
+          }
+          await renderRailList();
+        } catch (err) { console.warn("[Cyrene Chat] 删除会话失败:", err); }
+      },
+    },
+  ]);
+}
+
+// ══════════════════════════════════════════════════════════════
+// 单条消息操作：复制 / 删除 / 重新生成(AI) / 编辑重发(用户)
+// ══════════════════════════════════════════════════════════════
+/** 打开单条消息的操作菜单。 */
+function openMessageMenu(m: Message, x: number, y: number): void {
+  const items: CtxMenuItem[] = [];
+  const plainText = m.role === "user"
+    ? m.content.replace(/\[sticker:[^\]]+\]/g, "").trim()
+    : m.content;
+
+  if (plainText) {
+    items.push({
+      label: "复制", icon: "📋",
+      onClick: () => { void copyTextToClipboard(plainText); },
+    });
+  }
+
+  // 只有"最新一轮"才允许编辑重发/重新生成，且该轮未调用写类工具（避免重复副作用）。
+  const lastUserId = [...messages].reverse().find(x => x.role === "user")?.id;
+  const lastModelMsg = [...messages].reverse().find(x => x.role === "model");
+  // 最新 AI 回复是否用过写类工具（编辑重发会重跑这轮，因此也要看它）
+  const lastTurnUsedWriteTool = !!lastModelMsg?.usedWriteTool;
+
+  if (m.role === "user") {
+    // 编辑重发：仅对最新的用户消息开放，且最新一轮没有写类工具副作用
+    if (m.id === lastUserId && !lastTurnUsedWriteTool) {
+      items.push({
+        label: "编辑并重发", icon: "✏️",
+        onClick: () => startInlineEdit(m),
+      });
+    }
+  } else {
+    // 重新生成：仅对最新的 AI 回复开放，且该回复没有写类工具副作用
+    if (m.id === lastModelMsg?.id && !m.usedWriteTool) {
+      items.push({
+        label: "重新生成", icon: "🔄",
+        onClick: () => { void regenerateMessage(m); },
+      });
+    }
+  }
+
+  items.push({
+    label: "删除", icon: "🗑", danger: true,
+    onClick: () => { void deleteMessage(m); },
+  });
+
+  openContextMenu(x, y, items);
+}
+
+/** 删除单条消息。 */
+async function deleteMessage(m: Message): Promise<void> {
+  if (sending) { window.alert("生成中，请先停止再操作。"); return; }
+  const idx = messages.findIndex(x => x.id === m.id);
+  if (idx < 0) return;
+  messages.splice(idx, 1);
+  await saveSession();
+  render();
+}
+
+/**
+ * 重新生成某条 AI 回复：删除该回复及其之后的所有消息，
+ * 保留到上一条用户消息，然后基于现有历史重新触发一次生成。
+ */
+async function regenerateMessage(m: Message): Promise<void> {
+  if (sending) { window.alert("生成中，请先停止再操作。"); return; }
+  const idx = messages.findIndex(x => x.id === m.id);
+  if (idx < 0) return;
+  // 删除这条 AI 回复及之后的所有内容
+  messages.splice(idx);
+  // 取出最后一条用户消息：把它也移除，交给 send() 重新添加 + 重发（避免重复）
+  const lastUserIdx = [...messages].map(x => x.role).lastIndexOf("user");
+  if (lastUserIdx < 0) { await saveSession(); render(); return; }
+  const lastUser = messages[lastUserIdx];
+  const userText = lastUser.content;
+  // 移除该用户消息及其之后（正常情况下其后已无内容）
+  messages.splice(lastUserIdx);
+  await saveSession();
+  render();
+  await send(userText);
+}
+
+/** 供内联编辑重发用：以指定文本作为新一轮用户输入发送。 */
+async function sendProgrammatic(text: string): Promise<void> {
+  await send(text);
+}
+
+/** 编辑用户消息（气泡内联编辑）。确认后截断其后历史并重发。 */
+function startInlineEdit(m: Message): void {
+  if (sending) { window.alert("生成中，请先停止再操作。"); return; }
+  const row = messagesEl.querySelector(`[data-msg-id="${m.id}"]`);
+  if (!row) return;
+  const bubble = row.querySelector(".msg__bubble") as HTMLElement | null;
+  if (!bubble) return;
+  const original = m.content.replace(/\[sticker:[^\]]+\]/g, "").trim();
+
+  // 用 textarea 替换气泡内容
+  bubble.replaceChildren();
+  bubble.classList.add("msg__bubble--editing");
+  const ta = document.createElement("textarea");
+  ta.className = "msg__edit-input";
+  ta.value = original;
+  const btnRow = document.createElement("div");
+  btnRow.className = "msg__edit-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "msg__edit-btn";
+  cancel.textContent = "取消";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "msg__edit-btn msg__edit-btn--primary";
+  save.textContent = "保存并重发";
+  btnRow.appendChild(cancel);
+  btnRow.appendChild(save);
+  bubble.appendChild(ta);
+  bubble.appendChild(btnRow);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  autosizeTextarea(ta);
+  ta.addEventListener("input", () => autosizeTextarea(ta));
+
+  const doCancel = () => render();
+  const doSave = async () => {
+    const next = ta.value.trim();
+    if (!next) { doCancel(); return; }
+    const idx = messages.findIndex(x => x.id === m.id);
+    if (idx < 0) { doCancel(); return; }
+    // 截断：保留到这条用户消息之前，删掉它及其之后的所有消息
+    messages.splice(idx);
+    await saveSession();
+    render();
+    // 用编辑后的内容作为新的一轮用户输入重发
+    await sendProgrammatic(next);
+  };
+  cancel.addEventListener("click", doCancel);
+  save.addEventListener("click", () => { void doSave(); });
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void doSave(); }
+    else if (e.key === "Escape") { e.preventDefault(); doCancel(); }
+  });
+}
+
+function autosizeTextarea(ta: HTMLTextAreaElement): void {
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, 240) + "px";
+}
+
 chatStatusBtn?.addEventListener("click", () => {
   if (!chatRail) return;
   chatRail.toggleAttribute("hidden");
@@ -1171,11 +1489,37 @@ function render(): void {
       hasActionItem = true;
     }
 
+    // 更多操作「…」按钮：非 thinking、非纯表情包的消息才显示。
+    // 打开消息菜单（复制/删除/重新生成/编辑重发），与右键菜单同一套。
+    if (!m.thinking && (m.content.trim() || m.sticker)) {
+      const moreBtn = document.createElement("button");
+      moreBtn.type = "button";
+      moreBtn.className = "msg__more";
+      moreBtn.title = "更多";
+      moreBtn.setAttribute("aria-label", "更多操作");
+      moreBtn.textContent = "⋯";
+      moreBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const r = moreBtn.getBoundingClientRect();
+        openMessageMenu(m, r.left, r.bottom + 4);
+      });
+      actions.appendChild(moreBtn);
+      hasActionItem = true;
+    }
+
     // 时间戳总是显示；哪怕只有一个时间，也用 actions 行保持视觉一致
     actions.appendChild(time);
     hasActionItem = true;
 
     if (hasActionItem) body.appendChild(actions);
+
+    // 右键消息行也弹同一套菜单（thinking 中的不弹）
+    if (!m.thinking) {
+      row.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        openMessageMenu(m, e.clientX, e.clientY);
+      });
+    }
 
     row.appendChild(avatar);
     row.appendChild(body);
@@ -2162,6 +2506,35 @@ async function getModelReply(): Promise<ChatReplyPayload> {
 }
 
 let sending = false;
+// 停止生成：send() 运行期间登记一个停止回调；点停止按钮时调用它。
+let currentStopHandler: (() => void) | null = null;
+let stopRequested = false;
+
+/** 切换发送/停止按钮的外观与语义。sending=true 显示停止（■）。 */
+function setSendButtonMode(isSending: boolean): void {
+  if (isSending) {
+    sendBtn.classList.add("chat__send--stop");
+    sendBtn.setAttribute("aria-label", "停止生成");
+    sendBtn.title = "停止生成";
+    sendBtn.textContent = "■";
+    sendBtn.disabled = false; // 停止按钮必须可点
+  } else {
+    sendBtn.classList.remove("chat__send--stop");
+    sendBtn.setAttribute("aria-label", "发送");
+    sendBtn.title = "";
+    sendBtn.textContent = "↵";
+    sendBtn.disabled = false;
+  }
+}
+
+/** 用户点停止：中断后端请求 + 触发本轮 send() 的收尾（保留已输出内容）。 */
+function requestStop(): void {
+  if (!sending) return;
+  stopRequested = true;
+  try { void window.agui?.cancel(); } catch { /* 忽略 */ }
+  if (currentStopHandler) currentStopHandler();
+}
+
 
 // ── 快捷预设胶囊 ──────────────────────────────────────────
 // 空对话时在 empty-state 下方显示的半透明胶囊，点击后：
@@ -2232,7 +2605,8 @@ async function triggerCyreneGreeting(): Promise<void> {
   if (emptyEl) emptyEl.setAttribute("hidden", "");
 
   sending = true;
-  sendBtn.disabled = true;
+  stopRequested = false;
+  setSendButtonMode(true);
   await refreshModelConfig();
   chatHintEl.textContent = currentModelConfig?.connected ? `${currentModelConfig.model} 思考中…` : "模型未连接";
 
@@ -2271,6 +2645,13 @@ async function triggerCyreneGreeting(): Promise<void> {
         finishRun();
       }
     };
+    // 停止回调（与 send() 一致）：点停止立即收尾，保留已输出内容。
+    currentStopHandler = () => {
+      runFinishedArrived = true;
+      deltaQueue.length = 0;
+      if (playbackTimer !== null) { clearInterval(playbackTimer); playbackTimer = null; }
+      finishRun();
+    };
     const startPlayback = (): void => {
       if (playbackTimer !== null) return;
       playbackTimer = window.setInterval(() => {
@@ -2297,6 +2678,8 @@ async function triggerCyreneGreeting(): Promise<void> {
         const msg = messages.find(m => m.id === streamMsgId);
         switch (event.type) {
           case "TOOL_CALL_START": {
+            // 记录本轮是否用了写类工具（供"重新生成/编辑重发"门控）
+            if (isWriteRisk(event.toolRisk) && msg) msg.usedWriteTool = true;
             const bubble = getStreamingBubble();
             if (bubble) {
               bubble.classList.remove("msg__bubble--thinking");
@@ -2399,7 +2782,11 @@ async function triggerCyreneGreeting(): Promise<void> {
     const msg = messages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
-      msg.content = streamContent;
+      if (stopRequested) {
+        msg.content = streamContent ? streamContent + "\n\n[已停止生成]" : "[已停止生成]";
+      } else {
+        msg.content = streamContent;
+      }
       msg.sticker = sticker;
     }
     void saveSession();
@@ -2423,7 +2810,11 @@ async function triggerCyreneGreeting(): Promise<void> {
     const msg = messages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
-      msg.content = "连接模型失败：" + message;
+      if (streamContent) {
+        msg.content = streamContent + "\n\n[生成中断：" + message + "]";
+      } else {
+        msg.content = "连接模型失败：" + message;
+      }
     } else {
       messages.push({
         id: String(Date.now() + 2),
@@ -2435,15 +2826,16 @@ async function triggerCyreneGreeting(): Promise<void> {
     void saveSession();
     render();
   } finally {
+    currentStopHandler = null;
     sending = false;
-    sendBtn.disabled = false;
+    setSendButtonMode(false);
     chatHintEl.textContent = formatModelHint(currentModelConfig);
     inputEl.focus();
   }
 }
 
-async function send(): Promise<void> {
-  const text = inputEl.value.trim();
+async function send(overrideText?: string): Promise<void> {
+  const text = (overrideText !== undefined ? overrideText : inputEl.value).trim();
   if ((!text && attachedFiles.length === 0) || sending) return;
   // bootstrap 极快但理论上仍有竞态：currentSessionId 为 null 时消息无处可存，
   // 直接拦截避免丢失。正常情况下 bootstrap 会在用户首次按键前完成。
@@ -2557,6 +2949,14 @@ async function send(): Promise<void> {
         finishRun();
       }
     };
+    // 登记停止回调：点停止按钮时立即收尾（保留已流式输出内容）。
+    // 后端 fetch 已被 agui.cancel() 中断，这里只做本地收尾，不等后端事件。
+    currentStopHandler = () => {
+      runFinishedArrived = true;
+      deltaQueue.length = 0; // 不再回放剩余队列，已输出的 span 已在气泡里
+      if (playbackTimer !== null) { clearInterval(playbackTimer); playbackTimer = null; }
+      finishRun();
+    };
     const startPlayback = (): void => {
       if (playbackTimer !== null) return;
       playbackTimer = window.setInterval(() => {
@@ -2592,6 +2992,8 @@ async function send(): Promise<void> {
             if (playbackTimer !== null) { clearInterval(playbackTimer); playbackTimer = null; }
             streamContent = "";
             ttsContent = "";
+            // 记录本轮是否用了写类工具（供"重新生成/编辑重发"门控）
+            if (isWriteRisk(event.toolRisk) && msg) msg.usedWriteTool = true;
             const bubble = getStreamingBubble();
             if (bubble) {
               bubble.classList.remove("msg__bubble--thinking");
@@ -2727,7 +3129,12 @@ async function send(): Promise<void> {
     const msg = messages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
-      msg.content = streamContent;
+      // 用户主动停止：保留已流式输出的内容，追加"(已停止)"标记；不清空。
+      if (stopRequested) {
+        msg.content = streamContent ? streamContent + "\n\n[已停止生成]" : "[已停止生成]";
+      } else {
+        msg.content = streamContent;
+      }
       msg.sticker = sticker;
     }
     void saveSession();
@@ -2754,7 +3161,13 @@ async function send(): Promise<void> {
     const msg = messages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
-      msg.content = "连接模型失败：" + message;
+      // 关键：保留已经流式输出的内容，错误信息追加在后面（避免"清出内存后已输出内容消失"）。
+      // 用户主动停止走的是正常 runDone 路径，一般不会进这里；这里主要处理真实错误。
+      if (streamContent) {
+        msg.content = streamContent + "\n\n[生成中断：" + message + "]";
+      } else {
+        msg.content = "连接模型失败：" + message;
+      }
     } else {
       messages.push({
         id: String(Date.now() + 2),
@@ -2764,9 +3177,11 @@ async function send(): Promise<void> {
       });
     }
     void saveSession();
-    render();  } finally {
+    render();
+  } finally {
+    currentStopHandler = null;
     sending = false;
-    sendBtn.disabled = false;
+    setSendButtonMode(false);
     chatHintEl.textContent = formatModelHint(currentModelConfig);
     inputEl.focus();
   }
@@ -2795,6 +3210,8 @@ closeBtn.addEventListener("click", () => {
 /* ===== Composer ===== */
 formEl.addEventListener("submit", (e) => {
   e.preventDefault();
+  // 生成中：提交按钮语义变为"停止"
+  if (sending) { requestStop(); return; }
   void send();
 });
 
@@ -2802,6 +3219,7 @@ inputEl.addEventListener("input", autosize);
 inputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
+    if (sending) { requestStop(); return; }
     void send();
   }
 });

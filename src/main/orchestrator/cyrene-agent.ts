@@ -40,6 +40,41 @@ const FORCE_SUMMARY_TIMEOUT_MS = 90000; // 强制总结兜底：对话历史此�
 // 连续 MAX_CONSECUTIVE_TIMEOUTS 次超时直接跳出走强制总结，不再空转浪费时间。
 const MAX_CONSECUTIVE_TIMEOUTS = 2;
 
+/**
+ * 组合"超时 controller"和"用户停止 signal"：任一触发都 abort。
+ * 返回 { signal, cleanup }。cleanup 必须在请求结束后调用，清理监听器 + 定时器。
+ *
+ * 设计：不用 AbortSignal.any（跨 Node/Electron 版本兼容性保守），
+ * 用一个自建 controller 监听两个来源。
+ */
+function combineAbort(timeoutMs: number, external?: AbortSignal): {
+  signal: AbortSignal;
+  cleanup: () => void;
+  timedOut: () => boolean;
+} {
+  const controller = new AbortController();
+  let didTimeout = false;
+  const timer = setTimeout(() => { didTimeout = true; controller.abort(); }, timeoutMs);
+  const onExternal = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", onExternal, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (external) external.removeEventListener("abort", onExternal);
+    },
+    timedOut: () => didTimeout,
+  };
+}
+
+/** 判断一个 AbortError 是否由用户主动停止（外部 signal）触发，而非超时。 */
+function isUserAbort(external: AbortSignal | undefined, timedOut: boolean): boolean {
+  return !!external?.aborted && !timedOut;
+}
+
 /** 厂商配置（结构兼容 main/index.ts 的 ModelSettings，避免循环依赖）。 */
 export interface AgentLoopSettings {
   provider: string;
@@ -120,6 +155,8 @@ interface StreamRoundResult {
   textAlreadyStreamed: boolean;
   /** 本轮用于前端流式展示的 messageId（textAlreadyStreamed 时有效）。 */
   streamedMessageId?: string;
+  /** 用户主动停止：本轮为部分结果，上层应直接结束整个 run。 */
+  userStopped?: boolean;
 }
 
 /**
@@ -166,6 +203,7 @@ async function streamOneRound(
   observer: { next: (e: BaseEvent) => void },
   perRoundTimeoutMs: number,
   round: number,
+  externalSignal?: AbortSignal,
 ): Promise<StreamRoundResult> {
   const http = adapter.buildStreamRequest({ ...req, stream: true }, settings);
   console.log(LOG_PREFIX, "流式请求:", http.url);
@@ -186,8 +224,8 @@ async function streamOneRound(
   // }
   // ── 诊断日志结束 ──
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), perRoundTimeoutMs);
+  // 组合超时 + 用户停止：任一触发都 abort 底层 fetch
+  const abort = combineAbort(perRoundTimeoutMs, externalSignal);
 
   // 流式增量累积
   let text = "";
@@ -211,7 +249,7 @@ async function streamOneRound(
   try {
     const response = await fetch(http.url, {
       method: "POST",
-      signal: controller.signal,
+      signal: abort.signal,
       headers: http.headers,
       body: http.body,
     });
@@ -271,8 +309,26 @@ async function streamOneRound(
       if (chunk.usage) usage = chunk.usage;
       if (chunk.done) break;
     }
+  } catch (err) {
+    // 用户主动停止：把已流式输出的内容作为"部分结果"返回，不当错误抛出（前端保留已输出）。
+    if (err instanceof Error && err.name === "AbortError" && isUserAbort(externalSignal, abort.timedOut())) {
+      console.log(LOG_PREFIX, "用户主动停止流式，保留已输出 text长度=" + text.length);
+      if (textStarted) observer.next({ type: EventType.TEXT_MESSAGE_END, messageId: streamedMessageId } as BaseEvent);
+      const assistantMessage: ChatMessage = {
+        role: "assistant",
+        ...(text ? { content: text } : {}),
+        ...(thinking ? { thinking } : {}),
+      };
+      return {
+        text, thinking: thinking || undefined, toolCalls: [], finishReason: "stopped",
+        usage, assistantMessage, textAlreadyStreamed: textStarted,
+        streamedMessageId: textStarted ? streamedMessageId : undefined,
+        userStopped: true,
+      };
+    }
+    throw err;
   } finally {
-    clearTimeout(timer);
+    abort.cleanup();
   }
 
   // ── 临时诊断：流式收尾汇总（已定位=上下文超限；保留注释以便复用） ──
@@ -354,6 +410,7 @@ function buildFallbackReply(toolResults: ToolCallResult[], reason: string): stri
 async function runFcLoopWithEvents(
   options: CyreneRunOptions,
   observer: { next: (e: BaseEvent) => void; error: (e: unknown) => void; complete: () => void },
+  externalSignal?: AbortSignal,
 ): Promise<CyreneRunResult> {
   const { settings, messages, timeoutMs } = options;
   const adapter = getAdapter(settings.provider);
@@ -411,7 +468,7 @@ async function runFcLoopWithEvents(
       // —— 新增：真流式路径 ——
       let streamResult: StreamRoundResult;
       try {
-        streamResult = await streamOneRound(adapter, req, settings, observer, PER_ROUND_TIMEOUT_MS, round);
+        streamResult = await streamOneRound(adapter, req, settings, observer, PER_ROUND_TIMEOUT_MS, round, externalSignal);
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
           consecutiveTimeouts++;
@@ -426,6 +483,13 @@ async function runFcLoopWithEvents(
         }
         throw err;
       }
+      // 用户主动停止：本轮为部分结果，直接结束整个 run，保留已输出内容。
+      if (streamResult.userStopped) {
+        console.log(LOG_PREFIX, "用户停止，结束 run，返回部分结果");
+        observer.next({ type: EventType.STEP_FINISHED, stepName: `round-${round + 1}` });
+        const totalUsage = (accInput > 0 || accOutput > 0) ? { input: accInput, output: accOutput } : undefined;
+        return { reply: streamResult.text, toolResults: allToolResults, totalUsage };
+      }
       chat = {
         text: streamResult.text,
         thinking: streamResult.thinking,
@@ -438,25 +502,32 @@ async function runFcLoopWithEvents(
         streamedTextInfo = { messageId: streamResult.streamedMessageId };
       }
     } else {
-      // —— 原非流式路径（原样保留） ——
+      // —— 原非流式路径（原样保留，仅把 abort 换成组合信号以支持用户停止） ——
       const http = adapter.buildRequest(req, settings);
       console.log(LOG_PREFIX, "请求:", http.url);
 
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), PER_ROUND_TIMEOUT_MS);
+      const abort = combineAbort(PER_ROUND_TIMEOUT_MS, externalSignal);
       let response: Response;
       try {
         response = await fetch(http.url, {
           method: "POST",
-          signal: controller.signal,
+          signal: abort.signal,
           headers: http.headers,
           body: http.body,
         });
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
+          // 用户主动停止：结束整个 run（非流式无部分内容可留）
+          if (isUserAbort(externalSignal, abort.timedOut())) {
+            console.log(LOG_PREFIX, "用户主动停止（非流式）");
+            abort.cleanup();
+            observer.next({ type: EventType.STEP_FINISHED, stepName: `round-${round + 1}` });
+            const totalUsage = (accInput > 0 || accOutput > 0) ? { input: accInput, output: accOutput } : undefined;
+            return { reply: "", toolResults: allToolResults, totalUsage };
+          }
           consecutiveTimeouts++;
           console.warn(LOG_PREFIX, "第 " + (round + 1) + " 轮 LLM 请求超时（" + PER_ROUND_TIMEOUT_MS + "ms），连续第 " + consecutiveTimeouts + " 次");
-          clearTimeout(timer);
+          abort.cleanup();
           // 连续超时即退出：再重试只会让上下文更长更慢，注定超时。
           // 不再往 conversation 塞"超时提示"消息（雪上加霜），直接跳出走强制总结。
           if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
@@ -469,7 +540,7 @@ async function runFcLoopWithEvents(
         }
         throw err;
       } finally {
-        clearTimeout(timer);
+        abort.cleanup();
       }
 
       if (!response.ok) {
@@ -525,11 +596,14 @@ async function runFcLoopWithEvents(
         const toolCallId = tc.id || `${tc.name}-${Date.now()}`;
         const displayTool = toolRegistry.getById(tc.name);
         // 工具调用开始事件（toolCallName 用显示名，找不到工具则用 id 兜底）
+        // 附带 risk（safe/fs-read/fs-write/shell/network/input-control），供前端判断
+        // 这轮是否产生了副作用（写文件/跑命令/发邮件等），从而决定能否"重新生成/编辑重发"。
         observer.next({
           type: EventType.TOOL_CALL_START,
           toolCallId,
           toolCallName: displayTool?.name ?? tc.name,
-        });
+          toolRisk: (displayTool as (typeof displayTool) & { risk?: string })?.risk ?? "safe",
+        } as BaseEvent);
 
         let args: Record<string, unknown> = {};
         try {
@@ -628,14 +702,13 @@ async function runFcLoopWithEvents(
   const http = adapter.buildRequest(finalReq, settings);
   console.log(LOG_PREFIX, "请求:", http.url);
 
-  const controller = new AbortController();
   // 强制总结是最后兜底：对话历史此时往往已很长，30s 不够模型生成完会被 abort，
-  // 导致整个 run 抛错用户彻底没回复。放宽到 90s。
-  const timer = setTimeout(() => controller.abort(), FORCE_SUMMARY_TIMEOUT_MS);
+  // 导致整个 run 抛错用户彻底没回复。放宽到 90s。同时也支持用户主动停止。
+  const abort = combineAbort(FORCE_SUMMARY_TIMEOUT_MS, externalSignal);
   try {
     const response = await fetch(http.url, {
       method: "POST",
-      signal: controller.signal,
+      signal: abort.signal,
       headers: http.headers,
       body: http.body,
     });
@@ -682,7 +755,7 @@ async function runFcLoopWithEvents(
     const totalUsage = (accInput > 0 || accOutput > 0) ? { input: accInput, output: accOutput } : undefined;
     return { reply: fallback, toolResults: allToolResults, totalUsage };
   } finally {
-    clearTimeout(timer);
+    abort.cleanup();
   }
 }
 
@@ -710,10 +783,12 @@ export class CyreneAgent extends AbstractAgent {
 
     return new Observable<BaseEvent>((subscriber) => {
       let cancelled = false;
+      // 用户主动停止：unsubscribe 时 abort 这个 controller，signal 贯穿到底层 fetch，真正中断请求。
+      const abortController = new AbortController();
       (async () => {
         try {
           subscriber.next({ type: EventType.RUN_STARTED, threadId, runId });
-          const result = await runFcLoopWithEvents(options, subscriber);
+          const result = await runFcLoopWithEvents(options, subscriber, abortController.signal);
           this.lastResult = result;
           if (cancelled) return;
           subscriber.next({
@@ -729,7 +804,11 @@ export class CyreneAgent extends AbstractAgent {
         }
       })();
 
-      return () => { cancelled = true; };
+      return () => {
+        cancelled = true;
+        // 主动停止：中断底层 fetch（本地模型也会收到连接中断，停止推理）
+        try { abortController.abort(); } catch { /* 忽略 */ }
+      };
     });
   }
 

@@ -2032,3 +2032,194 @@ body {
 [data-ui-theme="pearl-white"] .approval-card--denied {
   border-color: rgba(220,40,80,0.36);
 }
+
+/* ═══════════════════════════════════════════════════════════
+   停止按钮 / 右键菜单 / 消息更多按钮 / 内联编辑 / 输入弹窗
+   （随「停止生成 + 消息操作 + 会话右键菜单」一起新增）
+   ═══════════════════════════════════════════════════════════ */
+
+/* 发送按钮切换成"停止"态：红色系，方形停止图标 */
+.chat__send--stop {
+  background: linear-gradient(135deg, #ff5a7a, #e0324f);
+  box-shadow: 0 0 22px rgba(224, 50, 79, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  font-size: 16px;
+}
+.chat__send--stop:hover:not(:disabled) {
+  box-shadow: 0 0 30px rgba(224, 50, 79, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+/* 消息"更多⋯"按钮：与 speak/copy 同款小图标按钮 */
+.msg__more {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--rb-radius-md);
+  background: transparent;
+  border: 1px solid var(--rb-border-soft);
+  color: var(--rb-text-muted);
+  cursor: pointer;
+  opacity: 0.75;
+  font-size: 16px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  transition: opacity 0.18s, background 0.18s, border-color 0.18s, color 0.18s;
+}
+.msg__more:hover {
+  opacity: 1;
+  background: var(--rb-border-faint);
+  border-color: var(--rb-border-strong);
+  color: var(--rb-text-default);
+}
+
+/* 通用上下文菜单浮层 */
+.ctx-menu {
+  position: fixed;
+  z-index: 100000;
+  min-width: 148px;
+  padding: 5px;
+  border-radius: 12px;
+  background: var(--rb-surface-strong, rgba(30, 22, 34, 0.98));
+  border: 1px solid var(--rb-border-soft);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(12px);
+  animation: ctx-menu-in 0.12s ease-out;
+}
+@keyframes ctx-menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.ctx-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  color: var(--rb-text-default);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.ctx-menu__item:hover {
+  background: var(--rb-border-faint);
+}
+.ctx-menu__item--danger {
+  color: var(--rb-pink-200, #ff8aa5);
+}
+.ctx-menu__item--danger:hover {
+  background: rgba(224, 50, 79, 0.16);
+  color: #ff5a7a;
+}
+.ctx-menu__icon {
+  font-size: 13px;
+  width: 16px;
+  text-align: center;
+}
+
+/* 气泡内联编辑 */
+.msg__bubble--editing {
+  width: 100%;
+  max-width: 100%;
+}
+.msg__edit-input {
+  width: 100%;
+  min-width: 240px;
+  box-sizing: border-box;
+  resize: none;
+  border-radius: 8px;
+  border: 1px solid var(--rb-border-strong);
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--rb-text-strong, #fff);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  outline: none;
+}
+.msg__edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.msg__edit-btn {
+  padding: 5px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--rb-border-soft);
+  background: transparent;
+  color: var(--rb-text-default);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.msg__edit-btn:hover { background: var(--rb-border-faint); }
+.msg__edit-btn--primary {
+  background: var(--rb-grad-pink-hot);
+  color: var(--rb-text-on-pink);
+  border-color: transparent;
+}
+
+/* 轻量输入弹窗（重命名会话用） */
+.chat-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100001;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  animation: ctx-menu-in 0.12s ease-out;
+}
+.chat-modal {
+  width: min(400px, 88vw);
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--rb-surface-strong, rgba(30, 22, 34, 0.99));
+  border: 1px solid var(--rb-border-soft);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.chat-modal__title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rb-text-strong, #fff);
+  margin-bottom: 14px;
+}
+.chat-modal__input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--rb-border-strong);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--rb-text-strong, #fff);
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+  margin-bottom: 16px;
+}
+.chat-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.chat-modal__btn {
+  padding: 7px 18px;
+  border-radius: 9px;
+  border: 1px solid var(--rb-border-soft);
+  background: transparent;
+  color: var(--rb-text-default);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.chat-modal__btn:hover { background: var(--rb-border-faint); }
+.chat-modal__btn--primary {
+  background: var(--rb-grad-pink-hot);
+  color: var(--rb-text-on-pink);
+  border-color: transparent;
+}

@@ -32,6 +32,9 @@ export interface ChatMessage {
   sticker?: string | null;
   /** TTS 缓存 key。只存 key，不存绝对路径，避免 userData 路径变化后 session JSON 失效。 */
   ttsCacheKey?: string;
+  /** 本轮 AI 是否调用了写类/副作用工具（写文件/跑命令/发邮件等）。
+   *  持久化用于：重载会话后仍能正确禁用"重新生成/编辑重发"，避免重复副作用。 */
+  usedWriteTool?: boolean;
 }
 
 export interface ChatSession {
