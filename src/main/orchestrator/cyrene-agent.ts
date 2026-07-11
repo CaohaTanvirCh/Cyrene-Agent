@@ -123,6 +123,34 @@ interface StreamRoundResult {
 }
 
 /**
+ * 从一个 SSE 事件的 data 里识别 OpenAI 兼容服务以流式事件形式返回的错误。
+ * 返回可读错误信息；非错误事件返回 null。
+ *
+ * 背景：LM Studio / vLLM 等在 HTTP 200 的流里可能推一个 {"error":{...}} 事件
+ * （典型：上下文超限），若不识别会被当成空回复静默吞掉。
+ */
+function extractStreamError(data: string): string | null {
+  const s = (data || "").trim();
+  if (!s || s === "[DONE]") return null;
+  // 快速过滤：没有 error 字样直接跳过，避免无谓 JSON.parse
+  if (!s.includes("\"error\"")) return null;
+  try {
+    const obj = JSON.parse(s) as { error?: { message?: string; type?: string } | string };
+    if (!obj || obj.error === undefined) return null;
+    if (typeof obj.error === "string") return "本地模型返回错误：" + obj.error;
+    const msg = obj.error.message || obj.error.type || "未知错误";
+    // 上下文超限给更友好的中文提示
+    if (/context size|exceed_context|context length|too many tokens/i.test(msg)) {
+      return "上下文超出模型可用长度。请在本地推理服务（如 LM Studio）里调大 context length，" +
+        "或切换到「日常聊天」模式（不携带工具，占用更少）。原始信息：" + msg;
+    }
+    return "本地模型返回错误：" + msg;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 真流式跑一轮（仅 OpenAI transport 用）。
  * - thinking 增量：实时发 CUSTOM cyrene.thinking（append 语义），前端边想边显示。
  * - text 增量：实时发 TEXT_MESSAGE_START/CONTENT（不预先切片，直接透传厂商 delta）。
@@ -141,6 +169,22 @@ async function streamOneRound(
 ): Promise<StreamRoundResult> {
   const http = adapter.buildStreamRequest({ ...req, stream: true }, settings);
   console.log(LOG_PREFIX, "流式请求:", http.url);
+  // ── 临时诊断日志（定位本地模型空回复问题，已定位=上下文超限；保留注释以便复用） ──
+  // try {
+  //   const bodyObj = JSON.parse(http.body) as { messages?: Array<{ role: string; content?: unknown }>; tools?: unknown[]; model?: string };
+  //   const msgs = bodyObj.messages ?? [];
+  //   console.log(LOG_PREFIX, "[诊断] 请求体字节数:", http.body.length,
+  //     "model:", bodyObj.model,
+  //     "messages:", msgs.length,
+  //     "tools:", Array.isArray(bodyObj.tools) ? bodyObj.tools.length : 0);
+  //   msgs.forEach((m, i) => {
+  //     const len = typeof m.content === "string" ? m.content.length : JSON.stringify(m.content ?? "").length;
+  //     console.log(LOG_PREFIX, `[诊断] msg[${i}] role=${m.role} content长度=${len}`);
+  //   });
+  // } catch (e) {
+  //   console.warn(LOG_PREFIX, "[诊断] 请求体解析失败:", e);
+  // }
+  // ── 诊断日志结束 ──
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), perRoundTimeoutMs);
@@ -152,6 +196,11 @@ async function streamOneRound(
   let usage: { input: number; output: number } | undefined;
   // 工具调用按 index 拼接
   const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+  // ── 临时诊断：统计收到的原始 SSE 事件（已定位，保留注释以便复用） ──
+  // let diagEventCount = 0;
+  // let diagChunkCount = 0;
+  // const diagFirstEvents: string[] = [];
+  // ── 诊断结束 ──
 
   // 正文流式展示：首个 text delta 到达时才发 TEXT_MESSAGE_START
   let textStarted = false;
@@ -174,8 +223,20 @@ async function streamOneRound(
     if (!response.body) throw new Error("响应体为空，不支持流式读取");
 
     for await (const event of createSseReader(adapter, response.body)) {
+      // ── 临时诊断：记录前 5 个原始事件（已定位，保留注释以便复用） ──
+      // diagEventCount++;
+      // if (diagFirstEvents.length < 5) diagFirstEvents.push(event.data.slice(0, 300));
+      // ── 诊断结束 ──
+      // 有些 OpenAI 兼容服务（如 LM Studio）在 HTTP 200 的流里以事件形式返回错误
+      // （典型：上下文超限 exceed_context_size_error）。parseStreamEvent 会把它当无效块忽略，
+      // 导致"静默空回复"。这里显式识别 error 字段并抛出，让用户看到真实原因。
+      const streamErr = extractStreamError(event.data);
+      if (streamErr) {
+        throw new Error(streamErr);
+      }
       const chunk = adapter.parseStreamEvent(event);
       if (!chunk) continue;
+      // diagChunkCount++;
 
       if (chunk.deltaThinking) {
         thinking += chunk.deltaThinking;
@@ -213,6 +274,21 @@ async function streamOneRound(
   } finally {
     clearTimeout(timer);
   }
+
+  // ── 临时诊断：流式收尾汇总（已定位=上下文超限；保留注释以便复用） ──
+  // console.log(LOG_PREFIX, "[诊断] 流式结束: 原始事件数=" + diagEventCount +
+  //   " 有效chunk数=" + diagChunkCount +
+  //   " text长度=" + text.length +
+  //   " thinking长度=" + thinking.length +
+  //   " toolCall数=" + toolAcc.size +
+  //   " finish=" + finishReason +
+  //   (usage ? " usage=" + JSON.stringify(usage) : ""));
+  // if (text.length === 0 && toolAcc.size === 0) {
+  //   console.warn(LOG_PREFIX, "[诊断] 空回复！前 5 个原始 SSE 事件如下：");
+  //   diagFirstEvents.forEach((e, i) => console.warn(LOG_PREFIX, `[诊断] event[${i}]: ${e}`));
+  //   if (diagFirstEvents.length === 0) console.warn(LOG_PREFIX, "[诊断] 没有收到任何 SSE 事件（流为空）。");
+  // }
+  // ── 诊断结束 ──
 
   // 组装 toolCalls（按 index 排序）
   const toolCalls: ToolCall[] = [...toolAcc.entries()]

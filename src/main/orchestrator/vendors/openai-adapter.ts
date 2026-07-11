@@ -9,7 +9,20 @@ import {
 function buildUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   if (trimmed.endsWith("/chat/completions")) return trimmed;
-  return `${trimmed}/chat/completions`;
+  // 兼容用户只填了主机端口（如 http://127.0.0.1:1234）却漏了 /v1 的情况：
+  // OpenAI 兼容端点是 {base}/v1/chat/completions。若 baseUrl 没有任何路径段
+  // （host:port 后直接结束），自动补 /v1，避免打到 /chat/completions（缺 /v1）导致空回复。
+  // 已带路径（/v1、/api/paas/v4、/compatible-mode/v1 等）的一律不动，保持原样。
+  let base = trimmed;
+  try {
+    const u = new URL(trimmed);
+    if (u.pathname === "" || u.pathname === "/") {
+      base = `${trimmed.replace(/\/+$/, "")}/v1`;
+    }
+  } catch {
+    // URL 解析失败（极少见）：保持原样，走原逻辑
+  }
+  return `${base}/chat/completions`;
 }
 
 /** 把统一消息翻译成 OpenAI wire messages。 */
@@ -251,7 +264,17 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
       }
       const data = await res.json();
       const parsed = this.parseResponse(data);
-      return { ok: true, latency, sample: parsed.text.slice(0, 80) || "(空回复)" };
+      const sample = parsed.text.trim();
+      // 空回复：多半是端点路径不对（如漏了 /v1）或模型名错误——厂商返回 200 但内容为空。
+      // 明确报失败并给排查提示，避免"测试通过但实际用不了"的困惑。
+      if (!sample) {
+        return {
+          ok: false,
+          latency,
+          error: "连接成功但模型返回空内容。请检查：① baseUrl 是否漏了 /v1（如应填 http://127.0.0.1:1234/v1）；② 模型名是否与本地已加载的一致。",
+        };
+      }
+      return { ok: true, latency, sample: sample.slice(0, 80) };
     } catch (e) {
       return { ok: false, latency: Date.now() - start, error: e instanceof Error ? e.message : String(e) };
     } finally {
