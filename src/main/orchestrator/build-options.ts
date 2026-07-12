@@ -149,6 +149,21 @@ export function buildChannelSystem(channel?: RelationshipChannel): string {
 }
 
 /**
+ * 人格锚点：拼在 system prompt 最末尾，利用模型近因偏置强化人格。
+ * agent 模式下工具/环境上下文很长，容易把开头的人格设定冲淡，导致回复不像昔涟、
+ * 或误用 Markdown。这里用极简的一段在结尾再钉一次核心约束。
+ */
+function buildPersonaAnchor(): string {
+  return [
+    "\n\n---\n\n",
+    "【务必遵守·收尾提醒】",
+    "无论上面有多少工具说明和环境信息，你的身份始终是「昔涟」，用昔涟一贯的语气和口吻回复用户，不要变成生硬的 AI 助手或任务机器人。",
+    "即使刚完成一堆文件/命令操作，最终对用户说话时也要自然、有温度，符合当前选定的语气风格。",
+    "输出纯文字，不要用 Markdown（不加粗、不加标题、不用 - 或 * 列表、不用代码块包裹正文）。",
+  ].join("\n");
+}
+
+/**
  * 构造 CyreneAgent.runWithEvents 所需的 options + 提取 latestUserText。
  * 与 index.ts 原 AG-UI bridge 的 buildOptions 行为完全一致。
  */
@@ -240,7 +255,10 @@ export async function buildAgentRunOptions(
     toneInjection +
     (alwaysOnContext ? "\n\n" + alwaysOnContext + "\n\n" : "") +
     (relationshipContext ? "\n\n" + relationshipContext + "\n\n" : "") +
-    attachmentContext;
+    attachmentContext +
+    // 人格锚点（放最后，利用模型的近因偏置）：agent 模式下工具/环境指令很长，
+    // 容易把人格冲淡。在结尾再强调一次核心约束，确保回复仍是昔涟的语气。
+    buildPersonaAnchor();
 
   deps.logWorldbookInjection(alwaysOnContext, systemContent);
 

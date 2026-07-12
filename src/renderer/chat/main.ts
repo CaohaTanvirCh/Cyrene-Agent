@@ -3658,7 +3658,8 @@ clearBtn.addEventListener("click", clearChat);
   var menus = {
     "mode-dropdown": document.getElementById("mode-dropdown"),
     "style-dropdown": document.getElementById("style-dropdown"),
-    "reasoning-dropdown": document.getElementById("reasoning-dropdown")
+    "reasoning-dropdown": document.getElementById("reasoning-dropdown"),
+    "permission-dropdown": document.getElementById("permission-dropdown")
   };
   var values = {
     "mode-dropdown": document.getElementById("mode-val"),
@@ -3698,6 +3699,7 @@ clearBtn.addEventListener("click", clearChat);
 
   // Option click
   Object.keys(menus).forEach(function(id) {
+    if (id === "permission-dropdown") return; // 权限下拉单独处理（见 setupPermissionDropdown）
     var menu = menus[id];
     if (!menu) return;
     menu.querySelectorAll(".dm-opt").forEach(function(opt) {
@@ -3713,7 +3715,126 @@ clearBtn.addEventListener("click", clearChat);
 
   // Click outside closes
   document.addEventListener("click", closeAll);
+
+  // 权限下拉：不走上面的通用 label 逻辑（需要 IPC + 完全访问二次确认），单独处理。
+  setupPermissionDropdown(closeAll);
 })();
+
+// ── 聊天窗权限档位下拉 ─────────────────────────────────────
+// 把「本地文件/命令权限」从设置中心搬到聊天顶栏，agent 操作前可就地切换。
+
+/**
+ * 「完全访问」风险确认弹窗（复用设置中心 confirmFullAccess 的体验：
+ * ⚠️ 风险提示 + 5 秒强制等待倒计时，防手滑）。chat 与 settings 是不同渲染入口，
+ * 无法直接 import，这里用同款交互重建一个自带 overlay 的弹窗。
+ */
+function confirmChatFullAccess(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "chat-modal-overlay";
+    const box = document.createElement("div");
+    box.className = "chat-modal";
+    const title = document.createElement("div");
+    title.className = "chat-modal__title";
+    title.textContent = "⚠️ 切换到完全访问？";
+    const msg = document.createElement("p");
+    msg.className = "chat-modal__body";
+    msg.textContent = "这意味着昔涟可以在你的电脑上自由执行命令，包括 git clone、npm install、删除文件等。请只在你完全信任她的判断时启用。";
+    const actions = document.createElement("div");
+    actions.className = "chat-modal__actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "chat-modal__btn";
+    cancel.textContent = "再想想";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "chat-modal__btn chat-modal__btn--primary";
+    confirm.disabled = true;
+    actions.appendChild(cancel);
+    actions.appendChild(confirm);
+    box.appendChild(title);
+    box.appendChild(msg);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    // 5 秒倒计时强制等待
+    let remain = 5;
+    confirm.textContent = "我了解风险（" + remain + "）";
+    const tick = window.setInterval(() => {
+      remain -= 1;
+      if (remain <= 0) {
+        confirm.disabled = false;
+        confirm.textContent = "我了解风险，启用";
+        clearInterval(tick);
+      } else {
+        confirm.textContent = "我了解风险（" + remain + "）";
+      }
+    }, 1000);
+
+    const cleanup = (result: boolean) => {
+      clearInterval(tick);
+      overlay.remove();
+      resolve(result);
+    };
+    cancel.addEventListener("click", () => cleanup(false));
+    confirm.addEventListener("click", () => { if (!confirm.disabled) cleanup(true); });
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(false); });
+  });
+}
+
+type ChatPermLevel = "read-only" | "scoped" | "per-action" | "full";
+const CHAT_PERM_LABEL: Record<ChatPermLevel, string> = {
+  "read-only": "只读",
+  "scoped": "指定目录",
+  "per-action": "每次询问",
+  "full": "完全访问",
+};
+function setupPermissionDropdown(closeAll: () => void): void {
+  const trigger = document.getElementById("permission-trigger");
+  const menu = document.getElementById("permission-dropdown");
+  const valEl = document.getElementById("permission-val");
+  if (!trigger || !menu || !valEl) return;
+
+  const paint = (level: ChatPermLevel): void => {
+    // scoped 在 UI 上归到只读一类显示（与设置中心一致）
+    const shown: ChatPermLevel = level === "scoped" ? "read-only" : level;
+    valEl.textContent = CHAT_PERM_LABEL[shown];
+    menu.querySelectorAll(".dm-opt").forEach((o) => {
+      o.classList.toggle("is-active", o.getAttribute("data-value") === shown);
+    });
+    // 完全访问用醒目色提示风险
+    trigger.classList.toggle("chat__perm--full", level === "full");
+  };
+
+  // 初始化：从后端读当前档位
+  void window.settings?.getPermissionLevel?.().then((r) => {
+    paint(((r?.level as ChatPermLevel) || "read-only"));
+  }).catch(() => paint("read-only"));
+
+  menu.querySelectorAll(".dm-opt").forEach((opt) => {
+    opt.addEventListener("click", async () => {
+      const target = opt.getAttribute("data-value") as ChatPermLevel;
+      closeAll();
+      if (!target) return;
+      // 切到"完全访问"：复用设置中心那套「风险提示 + 5 秒倒计时确认」体验
+      if (target === "full") {
+        const ok = await confirmChatFullAccess();
+        if (!ok) return;
+      }
+      try {
+        const res = await window.settings?.setPermissionLevel?.(target);
+        if (res && (res as { ok?: boolean }).ok === false) {
+          console.warn("[Chat] 切换权限档位失败:", res);
+          return;
+        }
+        paint(target);
+      } catch (err) {
+        console.warn("[Chat] 切换权限档位异常:", err);
+      }
+    });
+  });
+}
 
 
 /* ===== Floating particles (dreamy pink motes) =====

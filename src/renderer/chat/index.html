@@ -72,6 +72,11 @@
               <span class="dt-value" id="reasoning-val">Auto · 自动</span>
               <span class="dt-arrow"></span>
             </div>
+            <div class="dropdown-trigger" data-dropdown="permission-dropdown" id="permission-trigger" title="agent 的本地文件/命令权限">
+              <span class="dt-label">权限</span>
+              <span class="dt-value" id="permission-val">只读</span>
+              <span class="dt-arrow"></span>
+            </div>
             <button type="button" class="chat__icon-btn" id="clear" aria-label="清空对话" title="清空对话">⌫</button>
             <button type="button" class="chat__winbtn" id="min-btn" aria-label="最小化" title="最小化">
               <svg width="10" height="2" viewBox="0 0 10 2" aria-hidden="true"><rect width="10" height="2" rx="1" fill="currentColor"/></svg>
@@ -133,6 +138,12 @@
     <div class="dm-opt" data-value="Low · 低">Low · 低</div>
     <div class="dm-opt" data-value="Medium · 中">Medium · 中</div>
     <div class="dm-opt" data-value="High · 高">High · 高</div>
+  </div>
+  <div class="dropdown-menu" id="permission-dropdown">
+    <div class="dm-title">本地文件 / 命令权限</div>
+    <div class="dm-opt" data-value="read-only">🔒 只读 · 不改任何文件</div>
+    <div class="dm-opt" data-value="per-action">🔔 每次询问 · 操作前弹确认</div>
+    <div class="dm-opt" data-value="full">⚡ 完全访问 · 自由读写与执行</div>
   </div>
 </body>
 </html>

@@ -2189,6 +2189,12 @@ body {
   color: var(--rb-text-strong, #fff);
   margin-bottom: 14px;
 }
+.chat-modal__body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--rb-text-muted, #cbb8c8);
+  margin: 0 0 16px;
+}
 .chat-modal__input {
   width: 100%;
   box-sizing: border-box;
@@ -2333,4 +2339,15 @@ body {
   min-width: 26px;
   text-align: center;
   user-select: none;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   聊天顶栏权限下拉：完全访问档位用醒目色提示风险
+   ═══════════════════════════════════════════════════════════ */
+.dropdown-trigger.chat__perm--full {
+  border-color: rgba(224, 50, 79, 0.5);
+  background: rgba(224, 50, 79, 0.12);
+}
+.dropdown-trigger.chat__perm--full .dt-value {
+  color: #ff7a90;
 }
