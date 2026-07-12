@@ -35,6 +35,31 @@ export interface ChatMessage {
   /** 本轮 AI 是否调用了写类/副作用工具（写文件/跑命令/发邮件等）。
    *  持久化用于：重载会话后仍能正确禁用"重新生成/编辑重发"，避免重复副作用。 */
   usedWriteTool?: boolean;
+  /** agent 工具调用步骤时间线（持久化，重载会话后仍可见）。 */
+  steps?: AgentStep[];
+  /** 多版本回答（重新生成产生）。顶层字段是 versions[activeVersion] 的镜像。 */
+  versions?: MessageVersion[];
+  /** 当前激活版本下标。 */
+  activeVersion?: number;
+}
+
+/** 一次生成的完整结果快照（多版本切换用）。 */
+export interface MessageVersion {
+  content: string;
+  thinkingText?: string;
+  steps?: AgentStep[];
+  sticker?: string | null;
+  usedWriteTool?: boolean;
+  ttsCacheKey?: string;
+}
+
+/** agent 单个工具调用步骤。 */
+export interface AgentStep {
+  toolCallId: string;
+  toolName: string;
+  args?: string;
+  result?: string;
+  status: "running" | "done";
 }
 
 export interface ChatSession {

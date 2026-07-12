@@ -378,6 +378,8 @@ interface GeneralSettings {
   showThinking: boolean;
   /** 流式输出（思考+答案实时）。仅 OpenAI 兼容厂商生效。默认开。 */
   streamingOutput: boolean;
+  /** agent 思考/工具步骤块默认展开（true）还是折叠（false）。默认展开。 */
+  agentStepsExpanded: boolean;
   // TTS 配置
   ttsEngine: "off" | "minimax" | "gptsovits" | "custom-cloud" | "mimo";
   ttsAutoRead: boolean;
@@ -534,6 +536,7 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   dynamicBackground: true,
   showThinking: true,
   streamingOutput: true,
+  agentStepsExpanded: true,
   ttsEngine: "off",
   ttsAutoRead: true,
   ttsSpeed: 1,
@@ -940,6 +943,7 @@ function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undef
     dynamicBackground: input?.dynamicBackground === undefined ? DEFAULT_GENERAL_SETTINGS.dynamicBackground : Boolean(input.dynamicBackground),
     showThinking: input?.showThinking === undefined ? DEFAULT_GENERAL_SETTINGS.showThinking : Boolean(input.showThinking),
     streamingOutput: input?.streamingOutput === undefined ? DEFAULT_GENERAL_SETTINGS.streamingOutput : Boolean(input.streamingOutput),
+    agentStepsExpanded: input?.agentStepsExpanded === undefined ? DEFAULT_GENERAL_SETTINGS.agentStepsExpanded : Boolean(input.agentStepsExpanded),
     // TTS 配置
     ttsEngine: (["off", "minimax", "gptsovits", "custom-cloud", "mimo"].includes(input?.ttsEngine as string) ? input?.ttsEngine : "off") as GeneralSettings["ttsEngine"],
     ttsAutoRead: input?.ttsAutoRead === undefined ? DEFAULT_GENERAL_SETTINGS.ttsAutoRead : Boolean(input.ttsAutoRead),

@@ -270,6 +270,7 @@ interface GeneralSettings {
   dynamicBackground: boolean;
   showThinking: boolean;
   streamingOutput: boolean;
+  agentStepsExpanded: boolean;
 }
 
 interface UserApi {
@@ -480,7 +481,7 @@ if (!window.settings) {
         stickerSize: "standard",
       }),
     saveConfig: (c) => Promise.resolve(c as ModelSettings),
-    getGeneral: () => Promise.resolve({ musicEnabled: false, musicVolume: 60, soundEnabled: true, soundVolume: 70, petAlwaysOnTop: true, petVisible: true, petZoom: 1, sidebarVisible: true, tasksVisible: true, launchAtLogin: false, language: "zh-CN", uiTheme: "classic", dynamicBackground: true, showThinking: true, streamingOutput: true }),
+    getGeneral: () => Promise.resolve({ musicEnabled: false, musicVolume: 60, soundEnabled: true, soundVolume: 70, petAlwaysOnTop: true, petVisible: true, petZoom: 1, sidebarVisible: true, tasksVisible: true, launchAtLogin: false, language: "zh-CN", uiTheme: "classic", dynamicBackground: true, showThinking: true, streamingOutput: true, agentStepsExpanded: true }),
     saveGeneral: (c) => Promise.resolve(c as GeneralSettings),
     openSidebar: () => {},
     closeSidebar: () => {},
@@ -613,6 +614,7 @@ const launchAtLoginInput = document.getElementById("launch-at-login") as HTMLInp
 const dynamicBackgroundInput = document.getElementById("dynamic-background") as HTMLInputElement;
 const showThinkingInput = document.getElementById("show-thinking") as HTMLInputElement;
 const streamingOutputInput = document.getElementById("streaming-output") as HTMLInputElement;
+const agentStepsExpandedInput = document.getElementById("agent-steps-expanded") as HTMLInputElement;
 const uiThemeSelect = document.getElementById("ui-theme-select") as HTMLElement;
 const languageSelect = document.getElementById("language-select") as HTMLElement;
 const sidebarVisibleInput = document.getElementById("sidebar-visible") as HTMLInputElement;
@@ -964,6 +966,7 @@ async function loadGeneralSettings(): Promise<void> {
     dynamicBackgroundInput.checked = cfg.dynamicBackground !== false;
     showThinkingInput.checked = cfg.showThinking !== false;
     streamingOutputInput.checked = cfg.streamingOutput !== false;
+    agentStepsExpandedInput.checked = cfg.agentStepsExpanded !== false;
     applyUiThemeSelection(normalizeUiTheme(cfg.uiTheme));
     applyLanguageSelection("zh-CN");
     setGeneralSaveStatus("等待保存");
@@ -1025,6 +1028,7 @@ soundVolumeInput.addEventListener("input", () => setGeneralSaveStatus("有未保
 dynamicBackgroundInput.addEventListener("change", () => setGeneralSaveStatus("有未保存的更改"));
 showThinkingInput.addEventListener("change", () => setGeneralSaveStatus("有未保存的更改"));
 streamingOutputInput.addEventListener("change", () => setGeneralSaveStatus("有未保存的更改"));
+agentStepsExpandedInput.addEventListener("change", () => setGeneralSaveStatus("有未保存的更改"));
 
 petAlwaysOnTopInput.addEventListener("change", () => window.settings?.setPetAlwaysOnTop(petAlwaysOnTopInput.checked));
 petVisibleInput.addEventListener("change", () => window.settings?.setPetVisible(petVisibleInput.checked));
@@ -1872,6 +1876,7 @@ generalForm.addEventListener("submit", async (e) => {
       dynamicBackground: dynamicBackgroundInput.checked,
       showThinking: showThinkingInput.checked,
       streamingOutput: streamingOutputInput.checked,
+      agentStepsExpanded: agentStepsExpandedInput.checked,
     });
     setGeneralSaveStatus("已保存", "is-ok");
   } catch {

@@ -53,12 +53,31 @@ function formatDate(d: Date): string {
   return `${yyyy}-${mm}-${dd} ${week} ${hh}:${min}`;
 }
 
+function archLabel(): string {
+  // process.arch: x64 / arm64 / ia32 等。转成更通俗的说法。
+  const a = process.arch;
+  if (a === "x64") return "x86_64 (x64)";
+  if (a === "arm64") return "ARM64 (aarch64)";
+  if (a === "ia32") return "x86 (32位)";
+  return a;
+}
+
 function platformLabel(): string {
   const p = process.platform;
-  if (p === "win32") return `Windows (${os.release()})`;
-  if (p === "darwin") return `macOS (${os.release()})`;
-  if (p === "linux") return `Linux (${os.release()})`;
-  return `${p} (${os.release()})`;
+  const arch = archLabel();
+  if (p === "win32") return `Windows (${os.release()}) · ${arch}`;
+  if (p === "darwin") return `macOS (${os.release()}) · ${arch}`;
+  if (p === "linux") return `Linux (${os.release()}) · ${arch}`;
+  return `${p} (${os.release()}) · ${arch}`;
+}
+
+/** 默认命令行环境提示：Windows 用 PowerShell，类 Unix 用 shell。 */
+function shellLabel(): string {
+  if (process.platform === "win32") {
+    return "PowerShell（Windows；注意路径分隔符是反斜杠 \\，命令语法与 Unix 不同）";
+  }
+  const shell = process.env.SHELL || "/bin/sh";
+  return `${shell}（类 Unix；路径分隔符是正斜杠 /）`;
 }
 
 /**
@@ -110,6 +129,7 @@ export function buildEnvironmentContext(modelInfo?: ModelInfo, userInfo?: UserIn
   lines.push("");
   lines.push(`- 当前时间：${dateStr}（时区 ${tz}）`);
   lines.push(`- 操作系统：${platformLabel()}`);
+  lines.push(`- 命令行环境：${shellLabel()}`);
   lines.push(`- 当前用户名：${username}`);
   if (home) lines.push(`- 用户主目录：${home}`);
   if (desktop) lines.push(`- 桌面路径：${desktop}`);
@@ -120,10 +140,11 @@ export function buildEnvironmentContext(modelInfo?: ModelInfo, userInfo?: UserIn
   // 工作目录（workspace）：agent 的当前基准目录。空 = 纯聊天模式（无工作区）。
   const workspace = getWorkspace();
   if (workspace) {
-    lines.push(`- 当前工作目录：${workspace}`);
-    lines.push("  · 用户给相对路径（如 src/index.ts、./notes.txt）时，以这个工作目录为基准解析。");
+    lines.push(`- ★当前工作目录（写文件的默认基准，最高优先级）：${workspace}`);
+    lines.push("  · 用户没有明确给出绝对路径时，**一切文件读写都以这个工作目录为根**，用相对路径拼接（如 report/report.md → 工作目录/report/report.md）。");
+    lines.push("  · 用户提到的相对目录（如「在 report 下」）一律理解为相对这个工作目录，**绝不要写到桌面/文档/下载**。");
     lines.push("  · run_shell / 生成文档等未指定目录时，默认在这个工作目录下操作。");
-    lines.push("  · 仍可用绝对路径访问工作目录以外的位置（受权限档位约束）。");
+    lines.push("  · 只有当用户显式给出其他绝对路径时，才写到工作目录以外（受权限档位约束）。");
   } else {
     lines.push("- 当前工作目录：未设置（纯聊天模式）。文件类工具需要完整绝对路径；可提示用户在聊天窗顶部选择工作目录以启用相对路径。");
   }
@@ -164,14 +185,23 @@ export function buildEnvironmentContext(modelInfo?: ModelInfo, userInfo?: UserIn
     lines.push("");
   }
 
-  lines.push(
-    "当用户提到「桌面 / 文档 / 下载」却没给绝对路径时，使用上面这些真实路径拼接，再交给文件类工具；不要写 `~/Desktop` 或硬编码盘符。",
-  );
+  // 收尾的路径引导：有工作区时不再提"桌面/文档/下载"，避免把默认写入位置带偏；
+  // 无工作区时才给这句兜底引导。
+  if (workspace) {
+    lines.push(
+      "【重要】本次已设置工作目录。除非用户显式给出其它绝对路径，所有新建/写入文件都放在上面的工作目录下（用相对路径拼接），不要写到桌面/文档/下载等其它位置。",
+    );
+  } else {
+    lines.push(
+      "当用户提到「桌面 / 文档 / 下载」却没给绝对路径时，使用上面这些真实路径拼接，再交给文件类工具；不要写 `~/Desktop` 或硬编码盘符。",
+    );
+  }
 
   const text = lines.join("\n");
 
   console.log(
     LOG_PREFIX,
+    `os=${process.platform}/${process.arch}`,
     `level=${level}`,
     `desktop=${desktop || "?"}`,
     `allowed=${allowedTools.length}`,

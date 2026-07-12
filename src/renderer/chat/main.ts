@@ -24,7 +24,35 @@ interface Message {
   /** 本轮 AI 是否调用了写类/副作用工具（写文件/改文件/跑命令/发邮件等）。
    *  为 true 时禁止"重新生成/编辑重发"，避免重复副作用。 */
   usedWriteTool?: boolean;
+  /** agent 工具调用步骤时间线（每次工具调用一个块）。持久化，重载后仍可见。 */
+  steps?: AgentStep[];
   ttsCacheKey?: string;
+  /** 多版本（重新生成产生的多个回答版本）。仅 model 消息用。
+   *  顶层 content/thinkingText/steps/sticker/usedWriteTool 始终是 versions[activeVersion] 的镜像。 */
+  versions?: MessageVersion[];
+  /** 当前激活的版本下标（0-based）。 */
+  activeVersion?: number;
+}
+
+/** 一次生成的完整结果快照（多版本切换用）。 */
+interface MessageVersion {
+  content: string;
+  thinkingText?: string;
+  steps?: AgentStep[];
+  sticker?: string | null;
+  usedWriteTool?: boolean;
+  ttsCacheKey?: string;
+}
+
+/** agent 单个工具调用步骤（用于时间线展示，可展开看参数/结果）。 */
+interface AgentStep {
+  toolCallId: string;
+  toolName: string;
+  /** 工具参数 JSON 字符串（已截断）。 */
+  args?: string;
+  /** 工具返回结果（已截断）。 */
+  result?: string;
+  status: "running" | "done";
 }
 
 interface ChatReplyPayload {
@@ -122,6 +150,7 @@ interface AguiBaseEvent {
   toolCallId?: string;
   toolCallName?: string;
   toolRisk?: string; // 工具危险等级：safe/fs-read/fs-write/shell/network/input-control
+  toolArgs?: string; // 工具参数 JSON 字符串（已截断），供"可展开详情"显示
   content?: string;
   error?: string;
   stepName?: string;
@@ -293,6 +322,8 @@ let currentSessionId: string | null = null;
 let currentModelConfig: ModelConfig | null = null;
 // 是否显示模型思考过程（DeepSeek reasoning 等）。由通用设置控制，默认显示。
 let showThinking = true;
+// agent 思考/工具步骤块默认展开还是折叠。由通用设置控制，默认展开。
+let agentStepsExpanded = true;
 
 function formatModelHint(config: ModelConfig | null): string {
   if (!config || !config.connected) return "模型未连接";
@@ -395,6 +426,9 @@ interface ChatStoreSession {
     sticker?: string | null;
     ttsCacheKey?: string;
     usedWriteTool?: boolean;
+    steps?: AgentStep[];
+    versions?: MessageVersion[];
+    activeVersion?: number;
   }>;
   createdAt: number;
   updatedAt: number;
@@ -438,10 +472,12 @@ interface WorkspaceApi {
 // - 过滤空 content / 渲染中的 thinking 占位（thinking=true 时通常 content 为空，但保险起见双重过滤）
 // - 丢弃 thinking 字段（持久化层不存这种瞬态状态）
 function toPersistableMessages(arr: Message[]): Array<{
-  id: string; role: Role; content: string; at: number; sticker?: StickerId | null; ttsCacheKey?: string; usedWriteTool?: boolean;
+  id: string; role: Role; content: string; at: number; sticker?: StickerId | null; ttsCacheKey?: string; usedWriteTool?: boolean; steps?: AgentStep[]; versions?: MessageVersion[]; activeVersion?: number;
 }> {
   return arr
-    .filter((m) => m && (m.role === "user" || m.role === "model") && typeof m.content === "string" && m.content.trim() && !m.thinking)
+    // 保留：有正文，或有步骤时间线（纯步骤消息 content 可能为空但要留）；排除 thinking 占位
+    .filter((m) => m && (m.role === "user" || m.role === "model") && typeof m.content === "string"
+      && (m.content.trim() || (m.steps && m.steps.length > 0)) && !m.thinking)
     .map((m) => ({
       id: m.id,
       role: m.role,
@@ -450,6 +486,8 @@ function toPersistableMessages(arr: Message[]): Array<{
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
       ...(m.usedWriteTool ? { usedWriteTool: true } : {}),
+      ...(m.steps && m.steps.length > 0 ? { steps: m.steps } : {}),
+      ...(m.versions && m.versions.length > 1 ? { versions: m.versions, activeVersion: m.activeVersion ?? m.versions.length - 1 } : {}),
     }));
 }
 
@@ -475,6 +513,9 @@ function loadSessionIntoUI(session: ChatStoreSession): void {
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
       usedWriteTool: m.usedWriteTool,
+      steps: m.steps,
+      versions: m.versions,
+      activeVersion: m.activeVersion,
     });
   }
   // 上报活跃 sessionId（设置面板"删除当前会话"差异化提示用）
@@ -768,26 +809,117 @@ async function deleteMessage(m: Message): Promise<void> {
   render();
 }
 
+// ══════════════════════════════════════════════════════════════
+// 多版本（重新生成 <1/2> 切换）
+// ══════════════════════════════════════════════════════════════
+/** 把消息当前顶层内容快照成一个版本对象。 */
+function snapshotVersion(m: Message): MessageVersion {
+  return {
+    content: m.content,
+    thinkingText: m.thinkingText,
+    steps: m.steps,
+    sticker: m.sticker,
+    usedWriteTool: m.usedWriteTool,
+    ttsCacheKey: m.ttsCacheKey,
+  };
+}
+
+/** 把某个版本的内容应用到消息顶层字段（镜像）。 */
+function applyVersion(m: Message, v: MessageVersion): void {
+  m.content = v.content;
+  m.thinkingText = v.thinkingText;
+  m.steps = v.steps;
+  m.sticker = v.sticker ?? null;
+  m.usedWriteTool = v.usedWriteTool;
+  m.ttsCacheKey = v.ttsCacheKey;
+}
+
+/** 确保消息已版本化：若还没有 versions，则把当前内容存为 version[0]。 */
+function ensureVersioned(m: Message): void {
+  if (!m.versions || m.versions.length === 0) {
+    m.versions = [snapshotVersion(m)];
+    m.activeVersion = 0;
+  }
+}
+
+/** 切换某条消息的显示版本，重渲染并持久化。 */
+async function switchVersion(m: Message, target: number): Promise<void> {
+  if (!m.versions || target < 0 || target >= m.versions.length) return;
+  m.activeVersion = target;
+  applyVersion(m, m.versions[target]);
+  await saveSession();
+  render();
+}
+
 /**
- * 重新生成某条 AI 回复：删除该回复及其之后的所有消息，
- * 保留到上一条用户消息，然后基于现有历史重新触发一次生成。
+ * 重新生成某条 AI 回复：不删旧回复，而是把新生成结果作为"新版本"追加，可用 <1/2> 切换。
+ *
+ * 实现：先把当前内容版本化保存，记下重生成目标 id；移除最后一条用户消息交给 send() 重发。
+ * send() 会新建一条临时 model 消息生成；生成结束后 foldRegeneratedInto() 把它折叠进原消息的新版本。
  */
 async function regenerateMessage(m: Message): Promise<void> {
   if (sending) { window.alert("生成中，请先停止再操作。"); return; }
   const idx = messages.findIndex(x => x.id === m.id);
-  if (idx < 0) return;
-  // 删除这条 AI 回复及之后的所有内容
-  messages.splice(idx);
-  // 取出最后一条用户消息：把它也移除，交给 send() 重新添加 + 重发（避免重复）
-  const lastUserIdx = [...messages].map(x => x.role).lastIndexOf("user");
-  if (lastUserIdx < 0) { await saveSession(); render(); return; }
-  const lastUser = messages[lastUserIdx];
-  const userText = lastUser.content;
-  // 移除该用户消息及其之后（正常情况下其后已无内容）
-  messages.splice(lastUserIdx);
+  if (idx < 0 || m.role !== "model") return;
+  // 找到这条回复对应的用户消息（它前面最近的一条 user）
+  let userIdx = -1;
+  for (let i = idx - 1; i >= 0; i--) {
+    if (messages[i].role === "user") { userIdx = i; break; }
+  }
+  if (userIdx < 0) { window.alert("找不到对应的用户提问，无法重新生成。"); return; }
+  const userText = messages[userIdx].content;
+
+  // 当前内容先版本化
+  ensureVersioned(m);
+  // 删除这条 model 回复之后的所有消息（正常情况下其后为空），但保留这条 model 消息本身
+  messages.splice(idx + 1);
+  // 标记重生成目标 + 删掉这条 model 消息之外，把用户消息也移除交 send 重加
+  regenerateTargetId = m.id;
+  // 移除 model 消息（临时）与其之前的用户消息，让 send 以 userText 重新生成一条新消息
+  messages.splice(idx, 1);        // 移除 model 消息
+  messages.splice(userIdx, 1);    // 移除对应 user 消息
+  // 把待折叠的原消息挂起来（脱离 messages 数组，稍后折叠回去）
+  pendingRegenerateBase = m;
   await saveSession();
   render();
   await send(userText);
+}
+
+// 重新生成的挂起状态：send() 完成后把新生成的临时消息折叠进这个原消息的新版本
+let regenerateTargetId: string | null = null;
+let pendingRegenerateBase: Message | null = null;
+
+/**
+ * send() 完成后调用：若处于"重新生成"挂起态，把刚生成的临时消息（tempId）
+ * 折叠成原消息（pendingRegenerateBase）的一个新版本，并用原消息替换临时消息的位置。
+ */
+function maybeFoldRegenerated(tempId: string): void {
+  const base = pendingRegenerateBase;
+  if (!base) return;
+  pendingRegenerateBase = null;
+  regenerateTargetId = null;
+
+  const tempIdx = messages.findIndex(m => m.id === tempId);
+  if (tempIdx < 0) return;
+  const temp = messages[tempIdx];
+
+  // 原消息已 ensureVersioned，保底再确保一次
+  if (!base.versions) { base.versions = [snapshotVersion(base)]; base.activeVersion = 0; }
+  // 把临时消息的内容作为新版本追加
+  base.versions.push({
+    content: temp.content,
+    thinkingText: temp.thinkingText,
+    steps: temp.steps,
+    sticker: temp.sticker,
+    usedWriteTool: temp.usedWriteTool,
+    ttsCacheKey: temp.ttsCacheKey,
+  });
+  base.activeVersion = base.versions.length - 1;
+  applyVersion(base, base.versions[base.activeVersion]);
+  base.at = temp.at;
+  // 用原消息替换临时消息的位置（保持时间顺序）
+  messages.splice(tempIdx, 1, base);
+  void saveSession();
 }
 
 /** 供内联编辑重发用：以指定文本作为新一轮用户输入发送。 */
@@ -1322,6 +1454,7 @@ function setAvatar(slot: HTMLElement, role: Role): void {
 function buildThinkingBlock(text: string): HTMLElement {
   const details = document.createElement("details");
   details.className = "msg__thinking";
+  if (agentStepsExpanded) details.open = true; // 由设置控制默认展开/折叠
   const summary = document.createElement("summary");
   summary.className = "msg__thinking-summary";
   summary.textContent = "💭 思考过程";
@@ -1331,6 +1464,164 @@ function buildThinkingBlock(text: string): HTMLElement {
   details.appendChild(summary);
   details.appendChild(pre);
   return details;
+}
+
+// ══════════════════════════════════════════════════════════════
+// agent 步骤时间线：每个工具调用一个块，按顺序排列，不互相覆盖。
+// 工具块可点开看参数 + 返回结果（类似 opencode 折叠态）。
+// ══════════════════════════════════════════════════════════════
+/** 构建单个工具步骤块（<details> 可展开）。 */
+function buildStepBlock(step: AgentStep): HTMLElement {
+  const details = document.createElement("details");
+  details.className = "msg__step" + (step.status === "running" ? " msg__step--running" : "");
+  details.dataset.toolCallId = step.toolCallId;
+  if (agentStepsExpanded) details.open = true; // 由设置控制默认展开/折叠
+
+  const summary = document.createElement("summary");
+  summary.className = "msg__step-summary";
+  const icon = document.createElement("span");
+  icon.className = "msg__step-icon";
+  icon.textContent = step.status === "running" ? "⏳" : "🔧";
+  const name = document.createElement("span");
+  name.className = "msg__step-name";
+  name.textContent = step.toolName;
+  const state = document.createElement("span");
+  state.className = "msg__step-state";
+  state.textContent = step.status === "running" ? "调用中…" : "已完成";
+  summary.appendChild(icon);
+  summary.appendChild(name);
+  summary.appendChild(state);
+  details.appendChild(summary);
+
+  const body = document.createElement("div");
+  body.className = "msg__step-body";
+  // 原始命令：把工具参数渲染成人类可读的命令行/操作，而不是生 JSON
+  const cmd = formatStepCommand(step.args);
+  if (cmd) {
+    const cmdEl = document.createElement("div");
+    cmdEl.className = "msg__step-section";
+    cmdEl.innerHTML = "<span class=\"msg__step-label\">原始命令</span>";
+    const pre = document.createElement("pre");
+    pre.className = "msg__step-pre";
+    pre.textContent = cmd;
+    cmdEl.appendChild(pre);
+    body.appendChild(cmdEl);
+  }
+  if (step.result) {
+    const resEl = document.createElement("div");
+    resEl.className = "msg__step-section";
+    resEl.innerHTML = "<span class=\"msg__step-label\">结果</span>";
+    const pre = document.createElement("pre");
+    pre.className = "msg__step-pre";
+    pre.textContent = step.result.length > 2000 ? step.result.slice(0, 2000) + "\n…（已截断）" : step.result;
+    resEl.appendChild(pre);
+    body.appendChild(resEl);
+  }
+  details.appendChild(body);
+  return details;
+}
+
+/**
+ * 把工具参数（JSON 字符串）渲染成人类可读的"原始命令/操作"。
+ * - run_shell：$ command args...（含 cwd）
+ * - 文件类（path/content）：动词 + 路径
+ * - 其他：回退到紧凑 JSON
+ */
+function formatStepCommand(argsJson?: string): string {
+  if (!argsJson || argsJson === "{}") return "";
+  let a: Record<string, unknown>;
+  try { a = JSON.parse(argsJson); } catch { return argsJson; }
+
+  // run_shell / 执行命令
+  if (typeof a.command === "string") {
+    const argv = Array.isArray(a.args) ? a.args.map((x) => String(x)) : [];
+    let line = "$ " + [a.command, ...argv].join(" ");
+    if (typeof a.cwd === "string" && a.cwd) line += "\n(工作目录: " + a.cwd + ")";
+    return line;
+  }
+  // 文件类工具：有 path 字段
+  if (typeof a.path === "string") {
+    if (typeof a.content === "string") {
+      const bytes = new TextEncoder().encode(a.content).length;
+      return "写入文件: " + a.path + "  (" + bytes + " 字节)";
+    }
+    return "路径: " + a.path;
+  }
+  // URL 类
+  if (typeof a.url === "string") return "URL: " + a.url;
+  // 兜底：紧凑 JSON
+  return argsJson;
+}
+
+/** 构建整条消息的步骤时间线容器。 */
+function buildStepsTimeline(steps: AgentStep[]): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "msg__steps";
+  for (const s of steps) wrap.appendChild(buildStepBlock(s));
+  return wrap;
+}
+
+/** 构建版本切换器 < n/total >。 */
+function buildVersionNav(m: Message): HTMLElement {
+  const nav = document.createElement("div");
+  nav.className = "msg__ver-nav";
+  const total = m.versions?.length ?? 1;
+  const cur = (m.activeVersion ?? total - 1);
+
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "msg__ver-btn";
+  prev.textContent = "‹";
+  prev.title = "上一个版本";
+  prev.disabled = cur <= 0;
+  prev.addEventListener("click", (e) => { e.stopPropagation(); void switchVersion(m, cur - 1); });
+
+  const label = document.createElement("span");
+  label.className = "msg__ver-label";
+  label.textContent = `${cur + 1}/${total}`;
+
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "msg__ver-btn";
+  next.textContent = "›";
+  next.title = "下一个版本";
+  next.disabled = cur >= total - 1;
+  next.addEventListener("click", (e) => { e.stopPropagation(); void switchVersion(m, cur + 1); });
+
+  nav.appendChild(prev);
+  nav.appendChild(label);
+  nav.appendChild(next);
+  return nav;
+}
+
+/**
+ * 流式期间就地更新某条消息的步骤时间线（不整屏 render）。
+ * 找到该消息行的 .msg__steps 容器，按 toolCallId 更新/追加对应步骤块。
+ */
+function upsertStepBlock(m: Message, step: AgentStep): void {
+  const row = messagesEl.querySelector(`[data-msg-id="${m.id}"]`);
+  if (!row) return;
+  const body = row.querySelector(".msg__body");
+  if (!body) return;
+  let timeline = body.querySelector(".msg__steps") as HTMLElement | null;
+  if (!timeline) {
+    timeline = document.createElement("div");
+    timeline.className = "msg__steps";
+    // 时间线放在最前（思考块之后、气泡之前）
+    const thinking = body.querySelector(".msg__thinking");
+    if (thinking && thinking.nextSibling) body.insertBefore(timeline, thinking.nextSibling);
+    else body.insertBefore(timeline, body.firstChild);
+  }
+  const existing = timeline.querySelector(`[data-tool-call-id="${step.toolCallId}"]`);
+  const fresh = buildStepBlock(step);
+  if (existing) {
+    // 保留展开状态
+    if ((existing as HTMLDetailsElement).open) (fresh as HTMLDetailsElement).open = true;
+    existing.replaceWith(fresh);
+  } else {
+    timeline.appendChild(fresh);
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 /**
@@ -1357,7 +1648,7 @@ function render(): void {
   // 空态：当前会话还没有消息时（新建/全清）显示"昔涟期待与你聊天哦 ✨"占位
   // thinking 状态（昔涟主动开场/流式回复中）也算有消息，胶囊应立即消失
   const emptyEl = document.getElementById("chat-empty");
-  const hasMessages = messages.some((m) => m.content.trim() || m.thinking);
+  const hasMessages = messages.some((m) => m.content.trim() || m.thinking || (m.steps && m.steps.length > 0));
   if (emptyEl) emptyEl.toggleAttribute("hidden", hasMessages);
 
   messagesEl.replaceChildren();
@@ -1394,7 +1685,9 @@ function render(): void {
       if (cleanText) bubble.textContent = cleanText;
       else bubble.hidden = true; // 纯表情包消息不显示气泡
     } else {
-      bubble.textContent = m.content;
+      // model 消息：有正文才显示气泡；纯步骤（无最终文字）时隐藏空气泡，只留步骤时间线
+      if (m.content.trim()) bubble.textContent = m.content;
+      else bubble.hidden = true;
     }
 
     const time = document.createElement("div");
@@ -1404,6 +1697,11 @@ function render(): void {
     // 思考过程折叠块（若有且开关开启）：放在气泡上方，默认折叠
     if (m.role === "model" && showThinking && m.thinkingText && m.thinkingText.trim()) {
       body.appendChild(buildThinkingBlock(m.thinkingText));
+    }
+
+    // agent 工具步骤时间线（若有）：放在思考块之后、气泡之前
+    if (m.role === "model" && m.steps && m.steps.length > 0) {
+      body.appendChild(buildStepsTimeline(m.steps));
     }
 
     if (!bubble.hidden) body.appendChild(bubble);
@@ -1504,6 +1802,13 @@ function render(): void {
         openMessageMenu(m, r.left, r.bottom + 4);
       });
       actions.appendChild(moreBtn);
+      hasActionItem = true;
+    }
+
+    // 版本切换器 < 1/2 >：model 消息有多个版本时显示
+    if (m.role === "model" && !m.thinking && m.versions && m.versions.length > 1) {
+      const nav = buildVersionNav(m);
+      actions.appendChild(nav);
       hasActionItem = true;
     }
 
@@ -2678,36 +2983,39 @@ async function triggerCyreneGreeting(): Promise<void> {
         const msg = messages.find(m => m.id === streamMsgId);
         switch (event.type) {
           case "TOOL_CALL_START": {
-            // 记录本轮是否用了写类工具（供"重新生成/编辑重发"门控）
+            // 步骤块追加到时间线（与 send() 一致）
+            deltaQueue.length = 0;
+            if (playbackTimer !== null) { clearInterval(playbackTimer); playbackTimer = null; }
+            streamContent = "";
+            ttsContent = "";
             if (isWriteRisk(event.toolRisk) && msg) msg.usedWriteTool = true;
-            const bubble = getStreamingBubble();
-            if (bubble) {
-              bubble.classList.remove("msg__bubble--thinking");
-              bubble.replaceChildren();
-              const tip = document.createElement("div");
-              tip.className = "msg__tool-tip";
-              tip.dataset.toolCallId = event.toolCallId ?? "";
-              const icon = document.createElement("span");
-              icon.className = "msg__tool-icon";
-              icon.textContent = "🔧";
-              const text = document.createElement("span");
-              text.className = "msg__tool-text";
-              text.textContent = "调用中：" + (event.toolCallName ?? "工具");
-              tip.appendChild(icon);
-              tip.appendChild(text);
-              bubble.appendChild(tip);
+            if (msg) {
+              msg.thinking = false;
+              if (!msg.steps) msg.steps = [];
+              const step: AgentStep = {
+                toolCallId: event.toolCallId ?? String(Date.now()),
+                toolName: event.toolCallName ?? "工具",
+                args: event.toolArgs,
+                status: "running",
+              };
+              msg.steps.push(step);
+              const row = messagesEl.querySelector(`[data-msg-id="${streamMsgId}"]`);
+              if (!row || !row.querySelector(".msg__steps")) render();
+              else upsertStepBlock(msg, step);
+            }
+            break;
+          }
+          case "TOOL_CALL_RESULT": {
+            if (msg?.steps) {
+              const step = msg.steps.find(s => s.toolCallId === event.toolCallId);
+              if (step) { step.result = event.content ?? ""; upsertStepBlock(msg, step); }
             }
             break;
           }
           case "TOOL_CALL_END": {
-            const bubble = getStreamingBubble();
-            if (bubble) {
-              const tip = bubble.querySelector(".msg__tool-tip");
-              if (tip) {
-                const textEl = tip.querySelector(".msg__tool-text");
-                if (textEl) textEl.textContent = "已完成";
-                tip.classList.add("msg__tool-tip--done");
-              }
+            if (msg?.steps) {
+              const step = msg.steps.find(s => s.toolCallId === event.toolCallId);
+              if (step) { step.status = "done"; upsertStepBlock(msg, step); }
             }
             break;
           }
@@ -2986,50 +3294,48 @@ async function send(overrideText?: string): Promise<void> {
         const msg = messages.find(m => m.id === streamMsgId);
         switch (event.type) {
           case "TOOL_CALL_START": {
-            // 工具调用开始：在 thinking 气泡里显示"🔧 调用中：xxx"，替换三个点
-            // 流式路径下，本轮工具调用前可能有过程文本（已入 deltaQueue/已渲染），
-            // 先清空回放队列并停掉计时器 + 重置累积，避免残留字符盖在工具提示后面。
+            // 新设计：工具调用作为独立的"步骤块"追加到时间线，不再覆盖回答气泡。
+            // 之前的中间文本（若有）不是最终回答，清掉流式缓冲，让最终回答轮从干净状态开始。
             deltaQueue.length = 0;
             if (playbackTimer !== null) { clearInterval(playbackTimer); playbackTimer = null; }
             streamContent = "";
             ttsContent = "";
-            // 记录本轮是否用了写类工具（供"重新生成/编辑重发"门控）
             if (isWriteRisk(event.toolRisk) && msg) msg.usedWriteTool = true;
-            const bubble = getStreamingBubble();
-            if (bubble) {
-              bubble.classList.remove("msg__bubble--thinking");
-              bubble.replaceChildren();
-              const tip = document.createElement("div");
-              tip.className = "msg__tool-tip";
-              tip.dataset.toolCallId = event.toolCallId ?? "";
-              const icon = document.createElement("span");
-              icon.className = "msg__tool-icon";
-              icon.textContent = "🔧";
-              const text = document.createElement("span");
-              text.className = "msg__tool-text";
-              text.textContent = "调用中：" + (event.toolCallName ?? "工具");
-              tip.appendChild(icon);
-              tip.appendChild(text);
-              bubble.appendChild(tip);
+            if (msg) {
+              msg.thinking = false;
+              if (!msg.steps) msg.steps = [];
+              const step: AgentStep = {
+                toolCallId: event.toolCallId ?? String(Date.now()),
+                toolName: event.toolCallName ?? "工具",
+                args: event.toolArgs,
+                status: "running",
+              };
+              msg.steps.push(step);
+              // 首次出现步骤时，气泡可能还是 thinking 三点，render 一次建立带 steps 的结构
+              const row = messagesEl.querySelector(`[data-msg-id="${streamMsgId}"]`);
+              if (!row || !row.querySelector(".msg__steps")) render();
+              else upsertStepBlock(msg, step);
+            }
+            break;
+          }
+          case "TOOL_CALL_RESULT": {
+            // 记录工具返回结果到对应步骤
+            if (msg?.steps) {
+              const step = msg.steps.find(s => s.toolCallId === event.toolCallId);
+              if (step) { step.result = event.content ?? ""; upsertStepBlock(msg, step); }
             }
             break;
           }
           case "TOOL_CALL_END": {
-            // 工具调用完成：把"调用中"改成"完成"，淡出准备让位给文字
-            const bubble = getStreamingBubble();
-            if (bubble) {
-              const tip = bubble.querySelector(".msg__tool-tip");
-              if (tip) {
-                const textEl = tip.querySelector(".msg__tool-text");
-                if (textEl) textEl.textContent = "已完成";
-                tip.classList.add("msg__tool-tip--done");
-              }
+            // 标记步骤完成
+            if (msg?.steps) {
+              const step = msg.steps.find(s => s.toolCallId === event.toolCallId);
+              if (step) { step.status = "done"; upsertStepBlock(msg, step); }
             }
             break;
           }
           case "TEXT_MESSAGE_START":
-            // 切换 thinking 点 → 空气泡，render 一次建立 DOM（带 data-msg-id）
-            // 工具提示（若有）会被 render 重建清掉，自然过渡到文字
+            // 最终回答开始：切 thinking 点 → 空气泡。render 建立 DOM（含已累积的 steps 时间线）。
             if (msg) { msg.thinking = false; render(); }
             break;
           case "TEXT_MESSAGE_CONTENT":
@@ -3147,6 +3453,8 @@ async function send(overrideText?: string): Promise<void> {
       latestMsg.ttsCacheKey = cache.cacheKey;
       void saveSession();
     });
+    // 若本次是"重新生成"：把刚生成的临时消息折叠成原消息的新版本
+    maybeFoldRegenerated(streamMsgId);
     render();
     // 天气卡片在 render 后追加到末尾（模型回复之后）
     if (pendingWeatherCard) {
@@ -3524,10 +3832,11 @@ if (particlesCtx) {
 // 通用偏好（动态背景 / 显示思考）：启动时读一次，并在设置变更时实时应用。
 async function initGeneralPrefs(): Promise<void> {
   try {
-    const g = await window.settings?.getGeneral?.() as { dynamicBackground?: boolean; showThinking?: boolean } | undefined;
+    const g = await window.settings?.getGeneral?.() as { dynamicBackground?: boolean; showThinking?: boolean; agentStepsExpanded?: boolean } | undefined;
     if (g) {
       setDynamicBackground(g.dynamicBackground !== false);
       showThinking = g.showThinking !== false;
+      agentStepsExpanded = g.agentStepsExpanded !== false;
       render();
     }
   } catch { /* 读不到就保持默认（都开启） */ }

@@ -614,15 +614,6 @@ async function runFcLoopWithEvents(
       for (const tc of chat.toolCalls) {
         const toolCallId = tc.id || `${tc.name}-${Date.now()}`;
         const displayTool = toolRegistry.getById(tc.name);
-        // 工具调用开始事件（toolCallName 用显示名，找不到工具则用 id 兜底）
-        // 附带 risk（safe/fs-read/fs-write/shell/network/input-control），供前端判断
-        // 这轮是否产生了副作用（写文件/跑命令/发邮件等），从而决定能否"重新生成/编辑重发"。
-        observer.next({
-          type: EventType.TOOL_CALL_START,
-          toolCallId,
-          toolCallName: displayTool?.name ?? tc.name,
-          toolRisk: (displayTool as (typeof displayTool) & { risk?: string })?.risk ?? "safe",
-        } as BaseEvent);
 
         let args: Record<string, unknown> = {};
         try {
@@ -630,6 +621,18 @@ async function runFcLoopWithEvents(
         } catch {
           console.warn(LOG_PREFIX, "工具参数 JSON 解析失败:", tc.arguments?.slice(0, 100));
         }
+
+        // 工具调用开始事件（toolCallName 用显示名，找不到工具则用 id 兜底）
+        // 附带 risk（safe/fs-read/fs-write/shell/network/input-control），供前端判断
+        // 这轮是否产生了副作用（写文件/跑命令/发邮件等），从而决定能否"重新生成/编辑重发"。
+        // 附带 toolArgs（JSON 字符串，截断），供前端"可展开详情"显示。
+        observer.next({
+          type: EventType.TOOL_CALL_START,
+          toolCallId,
+          toolCallName: displayTool?.name ?? tc.name,
+          toolRisk: (displayTool as (typeof displayTool) & { risk?: string })?.risk ?? "safe",
+          toolArgs: JSON.stringify(args).slice(0, 1000),
+        } as BaseEvent);
 
         console.log(LOG_PREFIX, "执行工具:", tc.name, JSON.stringify(args).slice(0, 200));
 
