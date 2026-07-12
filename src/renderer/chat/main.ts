@@ -2886,7 +2886,8 @@ async function send(overrideText?: string): Promise<void> {
     const fullUserText = (text || (attachedFiles.length > 0 ? "请帮我看看这些文件" : "")) + fileHint;
 
   sending = true;
-  sendBtn.disabled = true;
+  stopRequested = false;
+  setSendButtonMode(true);
   await refreshModelConfig();
   chatHintEl.textContent = currentModelConfig?.connected ? `${currentModelConfig.model} 思考中…` : "模型未连接";
 

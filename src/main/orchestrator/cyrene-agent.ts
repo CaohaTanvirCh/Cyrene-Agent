@@ -34,27 +34,38 @@ import { truncateToolResult, compressConversation } from "./context-manager";
 
 const LOG_PREFIX = "[CyreneAgent]";
 const MAX_TOOL_ROUNDS = 20; // 多步任务（写 Excel 多 sheet、生成图片等）可能耗多轮；到顶强制无工具总结兜底
-const PER_ROUND_TIMEOUT_MS = 75000; // 推理模型带 thinking，30s 偏紧，放宽到 75s
-const FORCE_SUMMARY_TIMEOUT_MS = 90000; // 强制总结兜底：对话历史此时已很长，30s 不够，放宽到 90s
+// 空闲超时：两次数据到达之间的最大间隔。只要模型持续吐 token（哪怕很慢/中途重推），就不断刷新，不会误判超时。
+// 仅当真正卡住（这么久没有任何增量）才中断。本地大模型首 token 前的深度思考可能很久，给足余量（180s）。
+const PER_ROUND_TIMEOUT_MS = 180000;
+const FORCE_SUMMARY_TIMEOUT_MS = 180000; // 强制总结兜底同样按空闲超时处理
 // 连续超时即退出：超时后重试只会让上下文更长更慢，形成"超时→加消息→更慢→再超时"死循环。
 // 连续 MAX_CONSECUTIVE_TIMEOUTS 次超时直接跳出走强制总结，不再空转浪费时间。
 const MAX_CONSECUTIVE_TIMEOUTS = 2;
 
 /**
  * 组合"超时 controller"和"用户停止 signal"：任一触发都 abort。
- * 返回 { signal, cleanup }。cleanup 必须在请求结束后调用，清理监听器 + 定时器。
+ * 返回 { signal, cleanup, timedOut, keepAlive }。cleanup 必须在请求结束后调用。
+ *
+ * 超时语义为"空闲超时"（idle timeout）：调用 keepAlive() 会重置计时。
+ * 流式场景下每收到一个增量就 keepAlive，只要模型还在持续吐 token（哪怕很慢、
+ * 哪怕中途重新推理），就不会被判超时；只有真正"卡住不动" idleTimeoutMs 才 abort。
  *
  * 设计：不用 AbortSignal.any（跨 Node/Electron 版本兼容性保守），
  * 用一个自建 controller 监听两个来源。
  */
-function combineAbort(timeoutMs: number, external?: AbortSignal): {
+function combineAbort(idleTimeoutMs: number, external?: AbortSignal): {
   signal: AbortSignal;
   cleanup: () => void;
   timedOut: () => boolean;
+  keepAlive: () => void;
 } {
   const controller = new AbortController();
   let didTimeout = false;
-  const timer = setTimeout(() => { didTimeout = true; controller.abort(); }, timeoutMs);
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = () => {
+    timer = setTimeout(() => { didTimeout = true; controller.abort(); }, idleTimeoutMs);
+  };
+  arm();
   const onExternal = () => controller.abort();
   if (external) {
     if (external.aborted) controller.abort();
@@ -67,6 +78,12 @@ function combineAbort(timeoutMs: number, external?: AbortSignal): {
       if (external) external.removeEventListener("abort", onExternal);
     },
     timedOut: () => didTimeout,
+    // 收到数据时重置空闲计时器（已 abort 则不再重置）
+    keepAlive: () => {
+      if (controller.signal.aborted) return;
+      clearTimeout(timer);
+      arm();
+    },
   };
 }
 
@@ -261,6 +278,8 @@ async function streamOneRound(
     if (!response.body) throw new Error("响应体为空，不支持流式读取");
 
     for await (const event of createSseReader(adapter, response.body)) {
+      // 收到任意流式事件就刷新空闲超时：模型还在活动（含深度思考/重新推理），不判超时。
+      abort.keepAlive();
       // ── 临时诊断：记录前 5 个原始事件（已定位，保留注释以便复用） ──
       // diagEventCount++;
       // if (diagFirstEvents.length < 5) diagFirstEvents.push(event.data.slice(0, 300));

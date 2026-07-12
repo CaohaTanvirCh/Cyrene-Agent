@@ -1862,6 +1862,7 @@ const PROVIDER_SHORT_NAMES: Record<string, string> = {
   "Qwen（通义千问）": "Qwen",
   "ChatGPT（OpenAI）": "ChatGPT",
   "Claude（Anthropic）": "Claude",
+  "本地模型（Local）": "本地模型",
 };
 
 function getPublicModelConfig(settings = loadModelSettings()): PublicModelConfig {
@@ -1871,7 +1872,9 @@ function getPublicModelConfig(settings = loadModelSettings()): PublicModelConfig
     displayName: settings.displayName,
     shortName: PROVIDER_SHORT_NAMES[settings.provider] ?? settings.provider,
     model: settings.model,
-    connected: Boolean(settings.apiKey),
+    // 已连接判定：有 apiKey（云端厂商），或本地端点（无需 key，只要填了 baseUrl + model）。
+    connected: Boolean(settings.apiKey) ||
+      (isLocalModelEndpoint(settings.baseUrl) && Boolean(settings.model)),
     runtimeSync: settings.runtimeSync,
     stickerSize: settings.stickerSize,
     rerankerMode: settings.rerankerMode,
