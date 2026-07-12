@@ -1097,4 +1097,42 @@ toolRegistry.register({
   },
 });
 
+// ── 工具：ask_user（开放式提问）─────────────────────────────
+// 与 ask_user_choice 的区别：不带预设选项，纯粹问一个问题让用户打字回答。
+// 复用同一套 requestUserChoice 往返机制（options 传空数组，前端只显示问题+输入框）。
+toolRegistry.register({
+  id: "ask_user",
+  name: "询问用户",
+  description:
+    "需要用户补充信息才能继续时，向用户提出一个开放式问题并阻塞等待其文字回答。\n\n" +
+    "何时用：\n" +
+    "- 缺少关键信息无法继续（如：目标文件放哪、报告要包含哪些内容、用哪个账号）\n" +
+    "- 需要用户确认一个没有固定选项的细节\n\n" +
+    "不要用于：\n" +
+    "- 有明确候选项的选择（用 ask_user_choice 更好）\n" +
+    "- 用户已说清楚、或让你自己决定的情况\n\n" +
+    "参数：question（要问用户的问题文本）。工具会阻塞等待用户回答后返回。",
+  enabled: true,
+  risk: "safe",
+  inputSchema: {
+    type: "object",
+    properties: {
+      question: { type: "string", description: "要问用户的开放式问题，如「报告需要包含哪些章节？」" },
+    },
+    required: ["question"],
+  },
+  execute: async (args) => {
+    const question = String(args.question || "");
+    if (!question) return "[错误] question 不能为空";
+    console.log(LOG_PREFIX, "ask_user:", question);
+    // options 传空数组 → 前端只显示问题 + 文本输入框
+    const answer = await requestUserChoice(question, []);
+    console.log(LOG_PREFIX, "用户回答:", answer);
+    if (!answer) {
+      return "[ask_user] 用户未回答（超时）。可先按合理默认继续，或稍后再问。";
+    }
+    return `[ask_user] 用户回答：${answer}`;
+  },
+});
+
 toolRegistry.register(createPlayLive2DActionTool({ sendToLive2DWindow }));

@@ -2351,3 +2351,40 @@ body {
 .dropdown-trigger.chat__perm--full .dt-value {
   color: #ff7a90;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   停止生成浮条（独立于发送键，位于输入框上方，仅生成时显示）
+   ═══════════════════════════════════════════════════════════ */
+.chat__stopbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 6px 12px;
+}
+.chat__stopbar[hidden] { display: none; }
+.chat__queued {
+  font-size: 11px;
+  color: var(--rb-text-faint);
+}
+.chat__queued[hidden] { display: none; }
+.chat__stopbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 16px;
+  border-radius: var(--rb-radius-full);
+  border: 1px solid rgba(224, 50, 79, 0.5);
+  background: rgba(224, 50, 79, 0.12);
+  color: #ff7a90;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.1s;
+}
+.chat__stopbtn:hover {
+  background: rgba(224, 50, 79, 0.22);
+  border-color: rgba(224, 50, 79, 0.7);
+}
+.chat__stopbtn:active { transform: scale(0.97); }
+.chat__stopbtn-icon { font-size: 10px; line-height: 1; }

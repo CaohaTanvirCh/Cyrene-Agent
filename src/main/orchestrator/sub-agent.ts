@@ -29,6 +29,7 @@ const SUB_AGENT_TIMEOUT_MS = 60_000;
 const BLOCKED_TOOLS = new Set([
   "delegate_task",     // 防递归
   "ask_user_choice",   // 子代理不该跟用户交互（只有主 agent 能弹卡片）
+  "ask_user",          // 同上：开放式提问也只允许主 agent
 ]);
 
 /** 子代理返回的结构化结果。 */

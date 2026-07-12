@@ -204,6 +204,9 @@ const messagesEl = document.getElementById("messages") as HTMLElement;
 const formEl = document.getElementById("composer") as HTMLFormElement;
 const inputEl = document.getElementById("input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("send") as HTMLButtonElement;
+const stopBar = document.getElementById("stopbar") as HTMLElement | null;
+const stopBtn = document.getElementById("stop-btn") as HTMLButtonElement | null;
+const queuedHint = document.getElementById("queued-hint") as HTMLElement | null;
 const stickerPickerBtn = document.getElementById("sticker-picker-btn") as HTMLButtonElement;
 const stickerPicker = document.getElementById("sticker-picker") as HTMLElement;
 const stickerPickerGrid = document.getElementById("sticker-picker-grid") as HTMLElement;
@@ -1168,7 +1171,7 @@ function escapeHtml(s: string): string {
 function buildChoiceCardEl(data: {
   id: string;
   question: string;
-  options: Array<{ label: string; value: string; description?: string }>;
+  options?: Array<{ label: string; value: string; description?: string }>;
   default?: string;
 }): HTMLElement {
   const card = document.createElement("div");
@@ -1184,7 +1187,7 @@ function buildChoiceCardEl(data: {
   // 选项列表
   const list = document.createElement("div");
   list.className = "choice-card__list";
-  for (const opt of data.options) {
+  for (const opt of data.options ?? []) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "choice-card__option";
@@ -1213,13 +1216,14 @@ function buildChoiceCardEl(data: {
   }
   card.appendChild(list);
 
-  // 自定义输入
+  // 自定义输入（无选项时即纯开放式提问，占位文案更自然）
+  const isOpenQuestion = !data.options || data.options.length === 0;
   const customWrap = document.createElement("div");
   customWrap.className = "choice-card__custom";
   const customInput = document.createElement("input");
   customInput.type = "text";
   customInput.className = "choice-card__custom-input";
-  customInput.placeholder = "或输入自定义要求...";
+  customInput.placeholder = isOpenQuestion ? "输入你的回答…" : "或输入自定义要求...";
   customWrap.appendChild(customInput);
 
   const customBtn = document.createElement("button");
@@ -2814,21 +2818,34 @@ let sending = false;
 // 停止生成：send() 运行期间登记一个停止回调；点停止按钮时调用它。
 let currentStopHandler: (() => void) | null = null;
 let stopRequested = false;
+// 生成中追加的待发消息队列：当前回合结束后按序自动发送。
+const pendingQueue: string[] = [];
 
-/** 切换发送/停止按钮的外观与语义。sending=true 显示停止（■）。 */
+/**
+ * 切换"生成中"UI 状态。
+ * 新设计：发送键始终是发送键（生成中也能点=排队）；停止键是输入框上方独立的浮条，仅生成时显示。
+ */
 function setSendButtonMode(isSending: boolean): void {
-  if (isSending) {
-    sendBtn.classList.add("chat__send--stop");
-    sendBtn.setAttribute("aria-label", "停止生成");
-    sendBtn.title = "停止生成";
-    sendBtn.textContent = "■";
-    sendBtn.disabled = false; // 停止按钮必须可点
+  // 发送键保持"发送"语义，永不变停止
+  sendBtn.classList.remove("chat__send--stop");
+  sendBtn.setAttribute("aria-label", "发送");
+  sendBtn.title = "";
+  sendBtn.textContent = "↵";
+  sendBtn.disabled = false;
+  // 停止浮条：生成时显示
+  if (stopBar) stopBar.hidden = !isSending;
+  if (!isSending) updateQueuedHint();
+}
+
+/** 更新"已排队 N 条"提示。 */
+function updateQueuedHint(): void {
+  if (!queuedHint) return;
+  if (pendingQueue.length > 0) {
+    queuedHint.hidden = false;
+    queuedHint.textContent = `已排队 ${pendingQueue.length} 条，将在本轮结束后依次发送`;
   } else {
-    sendBtn.classList.remove("chat__send--stop");
-    sendBtn.setAttribute("aria-label", "发送");
-    sendBtn.title = "";
-    sendBtn.textContent = "↵";
-    sendBtn.disabled = false;
+    queuedHint.hidden = true;
+    queuedHint.textContent = "";
   }
 }
 
@@ -2836,8 +2853,34 @@ function setSendButtonMode(isSending: boolean): void {
 function requestStop(): void {
   if (!sending) return;
   stopRequested = true;
+  // 停止时清空排队（用户主动中断，不再自动续发）
+  pendingQueue.length = 0;
+  updateQueuedHint();
   try { void window.agui?.cancel(); } catch { /* 忽略 */ }
   if (currentStopHandler) currentStopHandler();
+}
+
+/**
+ * 生成中在输入框回车/点发送：把内容排队，当前回合结束后自动发。
+ * 返回 true 表示已处理（排队），false 表示当前空闲、应正常发送。
+ */
+function enqueueIfBusy(text: string): boolean {
+  if (!sending) return false;
+  const t = text.trim();
+  if (!t) return true; // 生成中空输入不处理
+  pendingQueue.push(t);
+  inputEl.value = "";
+  autosize();
+  updateQueuedHint();
+  return true;
+}
+
+/** 当前回合结束后调用：若队列有内容，取第一条自动发送。 */
+function flushQueue(): void {
+  if (sending) return;
+  const next = pendingQueue.shift();
+  updateQueuedHint();
+  if (next) void send(next);
 }
 
 
@@ -3139,6 +3182,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     setSendButtonMode(false);
     chatHintEl.textContent = formatModelHint(currentModelConfig);
     inputEl.focus();
+    flushQueue();
   }
 }
 
@@ -3493,6 +3537,8 @@ async function send(overrideText?: string): Promise<void> {
     setSendButtonMode(false);
     chatHintEl.textContent = formatModelHint(currentModelConfig);
     inputEl.focus();
+    // 本轮结束：若生成期间有排队消息，自动发下一条
+    flushQueue();
   }
 }
 function clearChat(): void {
@@ -3519,8 +3565,8 @@ closeBtn.addEventListener("click", () => {
 /* ===== Composer ===== */
 formEl.addEventListener("submit", (e) => {
   e.preventDefault();
-  // 生成中：提交按钮语义变为"停止"
-  if (sending) { requestStop(); return; }
+  // 生成中：把输入排队（当前回合结束后自动发），不打断当前生成
+  if (sending) { enqueueIfBusy(inputEl.value); return; }
   void send();
 });
 
@@ -3528,10 +3574,13 @@ inputEl.addEventListener("input", autosize);
 inputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    if (sending) { requestStop(); return; }
+    if (sending) { enqueueIfBusy(inputEl.value); return; }
     void send();
   }
 });
+
+// 停止按钮（输入框上方独立浮条）
+stopBtn?.addEventListener("click", () => { requestStop(); });
 
 
 /* ===== File upload ===== */
